@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Telethon session files (contain auth keys — treat as credentials)
+*.session
+*.session-journal
+
+# Local deduplication cache (regenerated at runtime)
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/

@@ -26,7 +26,8 @@ falls back to :func:`signal.signal` on platforms (Windows) where
 Common flags
 ------------
 ``--db PATH``       Deduplication SQLite cache (default ``leads_cache.db``).
-``--session NAME``  Telethon session name (default ``session_lead_sniper``).
+``--session NAME``  Telethon session name (default ``TG_SESSION_NAME``, falling
+                    back to ``session_auth_test``).
 ``--delay SECONDS`` Delay between demo messages (default ``2.0``).
 ``--chats LIST``    Comma-separated chat usernames/ids for ``--live``.
 ``--log-level``     Logging verbosity (default ``INFO``).
@@ -53,11 +54,16 @@ from db import DEFAULT_DB_PATH
 
 LOGGER = logging.getLogger("lead_sniper.main")
 
+import logging
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 # --------------------------------------------------------------------------- #
 # Defaults
 # --------------------------------------------------------------------------- #
 
-DEFAULT_SESSION: str = "session_lead_sniper"
+#: Fallback session name, kept in sync with :mod:`auth_test`.
+DEFAULT_SESSION: str = "session_auth_test"
 DEFAULT_DELAY: float = 2.0
 DEFAULT_LOG_LEVEL: str = "INFO"
 
@@ -145,6 +151,16 @@ def parse_chats(raw: str | None) -> list[str]:
 def read_monitor_chats() -> list[str]:
     """Read the ``--live`` chat targets from the ``TG_MONITOR_CHATS`` env var."""
     return parse_chats((os.getenv(MONITOR_CHATS_ENV) or "").strip())
+
+
+def read_session_name() -> str:
+    """Return the Telethon session name from ``TG_SESSION_NAME``.
+
+    Falls back to :data:`DEFAULT_SESSION` when the variable is unset or empty,
+    matching :func:`auth_test.read_session_name` so both entry points reuse the
+    same authorized session file.
+    """
+    return (os.getenv("TG_SESSION_NAME") or "").strip() or DEFAULT_SESSION
 
 
 def preview(text: str, limit: int = 90) -> str:
@@ -384,8 +400,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--session",
-        default=DEFAULT_SESSION,
-        help=f"Telethon session name (default: {DEFAULT_SESSION}).",
+        default=None,
+        help=(
+            "Telethon session name. Defaults to the TG_SESSION_NAME environment "
+            f"variable, falling back to {DEFAULT_SESSION}."
+        ),
     )
     parser.add_argument(
         "--delay",
@@ -420,7 +439,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(run_demo(args.db, max(0.0, args.delay)))
 
         chats = parse_chats(args.chats) or read_monitor_chats()
-        return asyncio.run(run_live(args.db, args.session, chats))
+        session = args.session or read_session_name()
+        return asyncio.run(run_live(args.db, session, chats))
 
     except KeyboardInterrupt:
         LOGGER.info("Interrupted by user (Ctrl+C). Shutting down.")

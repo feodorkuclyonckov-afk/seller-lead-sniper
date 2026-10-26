@@ -1,21 +1,23 @@
-"""Sprint 1.3 — isolated Telegram authentication smoke test.
+"""Sprint 1.3 — isolated Telegram authentication smoke test (QR login).
 
 Purpose
 -------
 Prove that the Telegram API credentials in ``.env`` are valid and that the
 account can be authorized from this machine (optionally through a SOCKS5
-proxy) *before* any scraping logic is written. The resulting session file is
-reused by the rest of the pipeline.
+proxy) *before* any scraping logic is written. Authentication is performed by
+linking a desktop device via a QR code — no SMS code is required. The
+resulting session file is reused by the rest of the pipeline.
 
 Usage
 -----
 1. Fill in ``.env`` (see ``.env.example``).
 2. Run ``python auth_test.py`` in an interactive terminal.
-3. Enter the phone number, the login code Telegram sends you and, if enabled,
-   your 2FA password.
+3. Scan the rendered QR code with your phone:
+   Telegram -> Settings -> Devices -> Link Desktop Device.
+4. If 2FA is enabled, enter your password when prompted.
 
-On success the authorized session is persisted to
-``session_auth_test.session`` and the process exits with code ``0``.
+On success the authorized session is persisted to ``<TG_SESSION_NAME>.session``
+and the process exits with code ``0``.
 
 Exit codes
 ----------
@@ -27,14 +29,17 @@ Exit codes
 from __future__ import annotations
 
 import asyncio
+import getpass
 import logging
 import os
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
+import qrcode
 from dotenv import load_dotenv
 from telethon import TelegramClient
+from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
 
 try:  # PySocks is only required when a proxy is actually configured.
     import socks
@@ -43,8 +48,7 @@ except ImportError:  # pragma: no cover - exercised only on broken installs
 
 LOGGER = logging.getLogger("lead_sniper.auth_test")
 
-SESSION_NAME: str = "session_auth_test"
-SESSION_FILE: str = f"{SESSION_NAME}.session"
+DEFAULT_SESSION_NAME: str = "session_auth_test"
 ENV_FILE: Path = Path(__file__).resolve().with_name(".env")
 
 # Telethon proxy tuple: (proxy_type, addr, port, rdns, username, password)
@@ -131,6 +135,14 @@ def read_api_credentials() -> Tuple[int, str]:
     return api_id, api_hash
 
 
+def read_session_name() -> str:
+    """Return the Telethon session name from ``TG_SESSION_NAME``.
+
+    Falls back to :data:`DEFAULT_SESSION_NAME` when the variable is unset.
+    """
+    return _read("TG_SESSION_NAME") or DEFAULT_SESSION_NAME
+
+
 def build_proxy() -> ProxyConfig:
     """Build a Telethon SOCKS5 proxy tuple, or ``None`` for a direct connection.
 
@@ -176,33 +188,85 @@ def build_proxy() -> ProxyConfig:
     return (socks.SOCKS5, host, port, True, username, password)
 
 
+def render_qr(url: str) -> None:
+    """Render a scannable QR code for ``url`` in the terminal."""
+    qr = qrcode.QRCode()
+    qr.add_data(url)
+    qr.print_ascii(invert=True)
+
+
+def print_qr_instructions() -> None:
+    """Print human-readable instructions for linking a desktop device."""
+    print()
+    print("=" * 60)
+    print("  Scan the QR code above with your phone:")
+    print("  Telegram -> Settings -> Devices -> Link Desktop Device")
+    print("=" * 60)
+    print()
+
+
+async def qr_authenticate(client: TelegramClient) -> None:
+    """Run the QR login flow until the client is authorized.
+
+    Raises:
+        SessionPasswordNeededError: re-raised only if the 2FA password is
+            invalid (handled by the caller as an auth failure).
+    """
+    while True:
+        qr_login = await client.qr_login()
+        render_qr(qr_login.url)
+        print_qr_instructions()
+
+        try:
+            await qr_login.wait()
+            return
+        except SessionPasswordNeededError:
+            password = getpass.getpass("Enter 2FA password: ")
+            try:
+                await client.sign_in(password=password)
+            except PasswordHashInvalidError:
+                LOGGER.error("Invalid 2FA password. Authentication aborted.")
+                raise
+            return
+        except asyncio.TimeoutError:
+            # The QR code expired before it was scanned — issue a fresh one.
+            LOGGER.warning("QR code expired. Generating a new one...")
+            continue
+
+
 async def authenticate() -> int:
-    """Run the interactive login flow and report the authorized account."""
+    """Run the QR login flow and report the authorized account."""
     await load_environment()
     api_id, api_hash = read_api_credentials()
+    session_name = read_session_name()
+    session_file = f"{session_name}.session"
     proxy = build_proxy()
 
-    client = TelegramClient(SESSION_NAME, api_id, api_hash, proxy=proxy)
+    client = TelegramClient(session_name, api_id, api_hash, proxy=proxy)
     try:
-        LOGGER.info(
-            "Starting interactive Telegram login (session=%s)...", SESSION_FILE
-        )
-        # start() prompts for phone number, login code and 2FA password as
-        # needed, and reuses the saved session when it is still valid.
-        await client.start()
+        LOGGER.info("Connecting to Telegram (session=%s)...", session_file)
+        await client.connect()
+
+        if not await client.is_user_authorized():
+            LOGGER.info("Not authorized — starting QR login flow.")
+            await qr_authenticate(client)
 
         me = await client.get_me()
         if me is None:
             LOGGER.error("Login completed but no user profile was returned.")
             return EXIT_AUTH_ERROR
 
+        full_name = " ".join(
+            part for part in (me.first_name, me.last_name) if part
+        ) or "(not set)"
         username = f"@{me.username}" if me.username else "(not set)"
+
         print()
         print("[SUCCESS] Authenticated successfully!")
-        print(f"User ID: {me.id}")
+        print(f"Name: {full_name}")
         print(f"Username: {username}")
-        print(f"Name: {me.first_name or ''}")
-        print(f"Session saved: {SESSION_FILE}")
+        print(f"User ID: {me.id}")
+        print(f"Session saved: {session_file}")
         return EXIT_OK
     finally:
         if client.is_connected():
@@ -218,6 +282,9 @@ def main() -> int:
     except ConfigError as exc:
         LOGGER.error("%s", exc)
         return EXIT_CONFIG_ERROR
+    except PasswordHashInvalidError:
+        LOGGER.error("Authentication failed: invalid 2FA password.")
+        return EXIT_AUTH_ERROR
     except (EOFError, KeyboardInterrupt):
         LOGGER.error(
             "Login aborted: no interactive terminal available, or cancelled by user."

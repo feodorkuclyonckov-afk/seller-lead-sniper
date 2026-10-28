@@ -41,18 +41,18 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
 
-try:  # PySocks is only required when a proxy is actually configured.
-    import socks
+try:  # python-socks is only required when a proxy is actually configured.
+    import python_socks  # noqa: F401
 except ImportError:  # pragma: no cover - exercised only on broken installs
-    socks = None  # type: ignore[assignment]
+    python_socks = None  # type: ignore[assignment]
 
 LOGGER = logging.getLogger("lead_sniper.auth_test")
 
 DEFAULT_SESSION_NAME: str = "session_auth_test"
 ENV_FILE: Path = Path(__file__).resolve().with_name(".env")
 
-# Telethon proxy tuple: (proxy_type, addr, port, rdns, username, password)
-ProxyConfig = Optional[Tuple[int, str, int, bool, Optional[str], Optional[str]]]
+# Telethon proxy config: a python-socks style dict, or None for direct.
+ProxyConfig = Optional[dict]
 
 EXIT_OK: int = 0
 EXIT_CONFIG_ERROR: int = 1
@@ -60,6 +60,13 @@ EXIT_AUTH_ERROR: int = 2
 
 # Hosts that mean "no proxy" — a local SOCKS listener is not a real egress.
 _DIRECT_HOSTS: frozenset[str] = frozenset({"", "127.0.0.1", "localhost"})
+
+#: Proxy schemes understood by python-socks / Telethon.
+_SUPPORTED_PROXY_TYPES: frozenset[str] = frozenset({"socks5", "socks4", "http"})
+
+#: Default scheme. The configured provider only speaks HTTP CONNECT on the
+#: port it advertises as SOCKS5, so ``http`` is the working default.
+DEFAULT_PROXY_TYPE: str = "http"
 
 
 class ConfigError(RuntimeError):
@@ -143,25 +150,50 @@ def read_session_name() -> str:
     return _read("TG_SESSION_NAME") or DEFAULT_SESSION_NAME
 
 
+def read_proxy_type() -> str:
+    """Return the configured proxy scheme, defaulting to ``http``.
+
+    The provider behind ``PROXY_HOST`` advertises port 8000 as SOCKS5 but only
+    speaks HTTP ``CONNECT``: a SOCKS5 handshake is silently dropped, surfacing
+    as ``ProxyTimeoutError: Proxy connection timed out``, while HTTP CONNECT
+    succeeds in well under a second. ``http`` is therefore the safe default;
+    set ``PROXY_TYPE=socks5`` explicitly for a genuine SOCKS5 endpoint.
+
+    Raises:
+        ConfigError: if ``PROXY_TYPE`` is set to an unsupported scheme.
+    """
+    raw = _read("PROXY_TYPE").lower() or DEFAULT_PROXY_TYPE
+    if raw not in _SUPPORTED_PROXY_TYPES:
+        raise ConfigError(
+            "PROXY_TYPE must be one of "
+            f"{sorted(_SUPPORTED_PROXY_TYPES)}, got {raw!r}."
+        )
+    return raw
+
+
 def build_proxy() -> ProxyConfig:
-    """Build a Telethon SOCKS5 proxy tuple, or ``None`` for a direct connection.
+    """Build a Telethon proxy dict, or ``None`` for a direct connection.
 
     A proxy is used only when ``PROXY_HOST`` is populated with something other
     than a loopback address.
 
+    ``rdns`` is deliberately ``False``: Telethon then connects to Telegram's
+    numeric DC IP addresses directly through the proxy. Remote DNS resolution
+    (``rdns=True``) times out on this provider.
+
     Raises:
-        ConfigError: if a proxy is requested but ``PySocks`` is unavailable or
-            ``PROXY_PORT`` is not a valid port number.
+        ConfigError: if a proxy is requested but ``python-socks`` is unavailable
+            or ``PROXY_PORT`` is not a valid port number.
     """
     host = _read("PROXY_HOST")
     if host.lower() in _DIRECT_HOSTS:
         LOGGER.info("No proxy configured — connecting directly to Telegram.")
         return None
 
-    if socks is None:
+    if python_socks is None:
         raise ConfigError(
-            "PROXY_HOST is set but PySocks is not installed. "
-            "Run: pip install -r requirements.txt"
+            "PROXY_HOST is set but python-socks is not installed. "
+            'Run: pip install "python-socks[asyncio]"'
         )
 
     raw_port = _read("PROXY_PORT")
@@ -177,15 +209,26 @@ def build_proxy() -> ProxyConfig:
 
     username = _read("PROXY_USER") or None
     password = _read("PROXY_PASS") or None
+    proxy_type = read_proxy_type()
 
     LOGGER.info(
-        "Routing traffic through SOCKS5 proxy %s:%d (auth=%s).",
+        "Routing traffic through %s proxy %s:%d (auth=%s, rdns=off).",
+        proxy_type.upper(),
         host,
         port,
         "yes" if username else "no",
     )
-    # rdns=True lets the proxy resolve DNS, avoiding local DNS leaks.
-    return (socks.SOCKS5, host, port, True, username, password)
+    proxy: dict = {
+        "proxy_type": proxy_type,
+        "addr": host,
+        "port": port,
+        "rdns": False,
+    }
+    if username:
+        proxy["username"] = username
+    if password:
+        proxy["password"] = password
+    return proxy
 
 
 def render_qr(url: str) -> None:

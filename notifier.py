@@ -119,11 +119,22 @@ DEFAULT_CHAT_ENV: Final[str] = "TELEGRAM_ALERT_CHAT_ID"
 FALLBACK_CHAT_ENV: Final[str] = "ALERT_CHAT_DEFAULT"
 
 #: Category (lower-case) -> dedicated destination chat environment variable.
+#:
+#: Both the English keys and the exact Russian labels emitted by
+#: :data:`classifier.CATEGORIES` are accepted, so a classifier payload routes
+#: correctly without any translation layer. Keys are matched after stripping
+#: surrounding whitespace and lower-casing (see :func:`resolve_alert_chat_id`).
 CATEGORY_CHAT_ENV: Final[dict[str, str]] = {
+    # English aliases.
     "fulfillment": "ALERT_CHAT_FULFILLMENT",
     "cargo": "ALERT_CHAT_CARGO",
     "marketing": "ALERT_CHAT_MARKETING",
     "design": "ALERT_CHAT_DESIGN",
+    # Russian labels emitted by classifier.CATEGORIES.
+    "фулфилмент": "ALERT_CHAT_FULFILLMENT",
+    "карго / логистика": "ALERT_CHAT_CARGO",
+    "маркетинг / трафик": "ALERT_CHAT_MARKETING",
+    "дизайн / контент": "ALERT_CHAT_DESIGN",
 }
 
 #: Matches a trailing, possibly incomplete HTML entity (``&amp``, ``&#12``).

@@ -720,6 +720,62 @@ def test_resolve_alert_chat_id_uses_alert_chat_default(
     assert _resolve_alert_chat_id("unknown_biz") == "-100fallback"
 
 
+#: Exact Russian labels emitted by ``classifier.CATEGORIES`` -> env variable.
+RUSSIAN_CATEGORY_ENV_VARS: Final[dict[str, str]] = {
+    "Фулфилмент": "ALERT_CHAT_FULFILLMENT",
+    "Карго / Логистика": "ALERT_CHAT_CARGO",
+    "Маркетинг / Трафик": "ALERT_CHAT_MARKETING",
+    "Дизайн / Контент": "ALERT_CHAT_DESIGN",
+}
+
+
+@pytest.mark.parametrize(
+    ("category", "env_var"),
+    sorted(RUSSIAN_CATEGORY_ENV_VARS.items()),
+)
+def test_resolve_alert_chat_id_routes_russian_category(
+    alert_env: pytest.MonkeyPatch,
+    category: str,
+    env_var: str,
+) -> None:
+    """Russian classifier labels route to their dedicated chat id."""
+    alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-1009999999999")
+    alert_env.setenv(env_var, f"-100{env_var.lower()}")
+
+    assert _resolve_alert_chat_id(category) == f"-100{env_var.lower()}"
+
+
+@pytest.mark.parametrize(
+    ("category", "env_var"),
+    sorted(RUSSIAN_CATEGORY_ENV_VARS.items()),
+)
+def test_resolve_alert_chat_id_russian_category_is_normalised(
+    alert_env: pytest.MonkeyPatch,
+    category: str,
+    env_var: str,
+) -> None:
+    """Russian labels match case-insensitively and ignore surrounding spaces."""
+    alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-1009999999999")
+    alert_env.setenv(env_var, f"-100{env_var.lower()}")
+
+    assert _resolve_alert_chat_id(f"  {category.upper()}  ") == (
+        f"-100{env_var.lower()}"
+    )
+    assert _resolve_alert_chat_id(f"\t{category.lower()}\n") == (
+        f"-100{env_var.lower()}"
+    )
+
+
+def test_resolve_alert_chat_id_russian_other_falls_back(
+    alert_env: pytest.MonkeyPatch,
+) -> None:
+    """The Russian ``Другое`` label has no route and uses the default chat."""
+    alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-100default")
+    alert_env.setenv("ALERT_CHAT_CARGO", "-100cargo")
+
+    assert _resolve_alert_chat_id("Другое") == "-100default"
+
+
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #

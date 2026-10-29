@@ -1,0 +1,55 @@
+# Target Telegram chats for join_chats.py
+#
+# One username or link per line. Blank lines and lines starting with "#" are
+# ignored. Leading "@" and URL prefixes (https://t.me/, t.me/, telegram.me/)
+# are stripped automatically, so all of the following are equivalent:
+#
+#   wb_chat_sellers
+#   @wb_chat_sellers
+#   https://t.me/wb_chat_sellers
+#
+# Existing curated target pool (kept so the monitored list only ever grows).
+
+wb_chat_sellers
+fulfillment_russia
+cargo_china_chat
+chat_wildberries_ozon
+sellers_wildberries
+market_place_ru
+wb_sellers_club
+marketplace_help
+chatozonwb
+ff_sklad_wb
+fulfillment_moscow
+chinacargo_chat
+dostavka_iz_kitaya_cargo
+wb_managers
+infografika_wb_ozon
+marketplace_chat_wb_ozon
+cargo_chat_moscow
+ecom_russia
+
+# New target usernames: append one per line below.
+# Discovered via join_chats.py --discover
+russian1688
+cargo5000
+obmen_CNY1
+ischy_postavvchika
+CargoBai_long
+kargosellers_dostavka
+tenesit_fulfillment
+fullyow
+wb_ozon_promotion
+WB_Ozon_fulfilment_group
+wildberries_business
+wildberries_postavshchikii_vip
+wildberries_postavshchikii_top
+wildberries_postavshchikii_cool
+wildberries_service
+kargo_dostavka_kitay
+Postavshchiki_Vayldberriz_OZON_C
+vbcrimea
+wildberries_suppliers_sellers
+wb_chat_otzyvy
+wb_ozon_chat
+suppliers_wbb

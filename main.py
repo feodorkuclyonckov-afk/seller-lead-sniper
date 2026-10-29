@@ -306,6 +306,79 @@ def _message_link(event: Any) -> str | None:
     return f"https://t.me/c/{marker}/{message_id}"
 
 
+def _entity_label(entity: Any) -> str:
+    """Return a human-readable label for a resolved Telethon input entity."""
+    username = getattr(entity, "username", None)
+    if username:
+        return f"@{username}"
+    title = getattr(entity, "title", None)
+    if title:
+        return str(title)
+    for attr in ("user_id", "channel_id", "chat_id"):
+        value = getattr(entity, attr, None)
+        if value is not None:
+            return f"{attr.replace('_id', '')}:{value}"
+    return str(entity)
+
+
+async def resolve_valid_chat_entities(
+    client: Any, chat_identifiers: Sequence[str]
+) -> list[Any]:
+    """Resolve chat identifiers to Telethon input entities, skipping invalid ones.
+
+    A single non-existent or inaccessible username must never prevent the other
+    monitored chats from being dispatched, so every resolution failure is logged
+    and skipped instead of propagating out of startup.
+    """
+    from telethon.errors import ChannelPrivateError, UsernameNotOccupiedError
+
+    valid_entities: list[Any] = []
+    skipped: list[str] = []
+
+    for identifier in chat_identifiers:
+        try:
+            entity = await client.get_input_entity(identifier)
+        except (UsernameNotOccupiedError, ChannelPrivateError, ValueError) as exc:
+            LOGGER.warning(
+                "Skipping chat %r: could not resolve (%s: %s)",
+                identifier,
+                type(exc).__name__,
+                exc,
+            )
+            skipped.append(identifier)
+            continue
+        except Exception as exc:  # noqa: BLE001 - one bad identifier must not abort startup
+            LOGGER.warning(
+                "Skipping chat %r: could not resolve (%s: %s)",
+                identifier,
+                type(exc).__name__,
+                exc,
+            )
+            skipped.append(identifier)
+            continue
+        valid_entities.append(entity)
+        LOGGER.info("Resolved chat %r -> %s", identifier, _entity_label(entity))
+
+    if valid_entities:
+        LOGGER.info(
+            "Active resolved chats (%d/%d): %s",
+            len(valid_entities),
+            len(chat_identifiers),
+            ", ".join(_entity_label(entity) for entity in valid_entities),
+        )
+    else:
+        LOGGER.warning(
+            "No chat entities resolved from %d identifier(s); "
+            "listening to all incoming messages.",
+            len(chat_identifiers),
+        )
+    if skipped:
+        LOGGER.warning(
+            "Skipped %d invalid chat(s): %s", len(skipped), ", ".join(skipped)
+        )
+    return valid_entities
+
+
 async def run_live(db_path: str, session: str, chats: list[str]) -> int:
     """Start the Telethon client and process incoming messages until stopped."""
     # Imported lazily so ``--demo`` works even without Telethon installed.
@@ -318,23 +391,6 @@ async def run_live(db_path: str, session: str, chats: list[str]) -> int:
 
     await db_module.init_db(db_path)
 
-    @client.on(events.NewMessage(chats=chats or None))
-    async def _on_new_message(event: Any) -> None:
-        text = getattr(event, "raw_text", "") or ""
-        if not text.strip():
-            LOGGER.debug("Skipping empty/non-text message from %s", _chat_name(event))
-            return
-        source = _chat_name(event)
-        link = _message_link(event)
-        try:
-            result = await pipeline.process_raw_message(
-                text, source, link, db_path
-            )
-        except Exception:  # pragma: no cover - process_raw_message is defensive
-            LOGGER.exception("Unhandled pipeline failure | source=%s", source)
-            return
-        LOGGER.info("Live result | source=%s | status=%s", source, result["status"])
-
     stop_event = asyncio.Event()
 
     try:
@@ -344,6 +400,31 @@ async def run_live(db_path: str, session: str, chats: list[str]) -> int:
             ", ".join(chats) if chats else "<all incoming>",
         )
         await client.start()
+
+        valid_entities = await resolve_valid_chat_entities(client, chats)
+        chats_filter = valid_entities if valid_entities else None
+
+        @client.on(events.NewMessage(chats=chats_filter))
+        async def _on_new_message(event: Any) -> None:
+            text = getattr(event, "raw_text", "") or ""
+            if not text.strip():
+                LOGGER.debug(
+                    "Skipping empty/non-text message from %s", _chat_name(event)
+                )
+                return
+            source = _chat_name(event)
+            link = _message_link(event)
+            try:
+                result = await pipeline.process_raw_message(
+                    text, source, link, db_path
+                )
+            except Exception:  # pragma: no cover - process_raw_message is defensive
+                LOGGER.exception("Unhandled pipeline failure | source=%s", source)
+                return
+            LOGGER.info(
+                "Live result | source=%s | status=%s", source, result["status"]
+            )
+
         install_shutdown_handler(stop_event)
         LOGGER.info("Listening for new messages. Press Ctrl+C to stop.")
 

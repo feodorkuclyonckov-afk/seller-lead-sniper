@@ -95,6 +95,31 @@ def _tg_env(values: dict[str, str] | None = None) -> Iterator[None]:
                 os.environ[key] = value
 
 
+@contextlib.contextmanager
+def _proxy_env(values: dict[str, str] | None = None) -> Iterator[None]:
+    """Temporarily replace the ``PROXY_*`` environment variables."""
+    keys = (
+        "PROXY_TYPE",
+        "PROXY_HOST",
+        "PROXY_PORT",
+        "PROXY_USER",
+        "PROXY_PASS",
+    )
+    saved = {key: os.environ.get(key) for key in keys}
+    for key in keys:
+        os.environ.pop(key, None)
+    if values:
+        os.environ.update(values)
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def _client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
     """Build an ``AsyncClient`` backed by a mock transport."""
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -589,9 +614,150 @@ async def test_unconfigured(reporter: Reporter) -> None:
     )
 
 
+async def test_proxy_configuration(reporter: Reporter) -> None:
+    """``PROXY_*`` settings must resolve to a standard httpx proxy URL."""
+    reporter.section("9. Proxy resolution")
+
+    with _proxy_env():
+        reporter.check(
+            "no PROXY_HOST means a direct connection",
+            notifier.resolve_proxy_url() is None,
+        )
+
+    with _proxy_env({"PROXY_HOST": "127.0.0.1", "PROXY_PORT": "8000"}):
+        reporter.check(
+            "loopback PROXY_HOST means a direct connection",
+            notifier.resolve_proxy_url() is None,
+        )
+
+    with _proxy_env(
+        {
+            "PROXY_TYPE": "http",
+            "PROXY_HOST": "196.18.15.173",
+            "PROXY_PORT": "8000",
+            "PROXY_USER": "WjFyem",
+            "PROXY_PASS": "aaK5a3",
+        }
+    ):
+        reporter.check(
+            "authenticated HTTP proxy URL is built",
+            notifier.resolve_proxy_url()
+            == "http://WjFyem:aaK5a3@196.18.15.173:8000",
+            repr(notifier.resolve_proxy_url()),
+        )
+
+    with _proxy_env(
+        {
+            "PROXY_HOST": "proxy.example.com",
+            "PROXY_PORT": "3128",
+            "PROXY_USER": "u@ser",
+            "PROXY_PASS": "p:ss/word",
+        }
+    ):
+        reporter.check(
+            "proxy credentials are URL-encoded",
+            notifier.resolve_proxy_url()
+            == "http://u%40ser:p%3Ass%2Fword@proxy.example.com:3128",
+            repr(notifier.resolve_proxy_url()),
+        )
+
+    with _proxy_env({"PROXY_HOST": "proxy.example.com", "PROXY_PORT": "3128"}):
+        reporter.check(
+            "PROXY_TYPE defaults to http",
+            notifier.resolve_proxy_url()
+            == "http://proxy.example.com:3128",
+            repr(notifier.resolve_proxy_url()),
+        )
+
+    with _proxy_env({"PROXY_HOST": "proxy.example.com", "PROXY_PORT": "abc"}):
+        reporter.check(
+            "non-numeric PROXY_PORT falls back to direct",
+            notifier.resolve_proxy_url() is None,
+        )
+
+    with _proxy_env({"PROXY_HOST": "proxy.example.com", "PROXY_PORT": "70000"}):
+        reporter.check(
+            "out-of-range PROXY_PORT falls back to direct",
+            notifier.resolve_proxy_url() is None,
+        )
+
+    with _proxy_env(
+        {
+            "PROXY_TYPE": "ftp",
+            "PROXY_HOST": "proxy.example.com",
+            "PROXY_PORT": "3128",
+        }
+    ):
+        reporter.check(
+            "unsupported PROXY_TYPE falls back to direct",
+            notifier.resolve_proxy_url() is None,
+        )
+
+
+async def test_delivery_uses_proxy(reporter: Reporter) -> None:
+    """A configured proxy must be passed to the internally created client."""
+    reporter.section("10. Delivery — proxy routing")
+
+    captured: dict[str, Any] = {}
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    def factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        captured.update(kwargs)
+        return real_client(
+            transport=httpx.MockTransport(handler),
+            timeout=kwargs.get("timeout"),
+        )
+
+    with _proxy_env(
+        {
+            "PROXY_TYPE": "http",
+            "PROXY_HOST": "196.18.15.173",
+            "PROXY_PORT": "8000",
+            "PROXY_USER": "user",
+            "PROXY_PASS": "pass",
+        }
+    ):
+        with mock.patch.object(notifier.httpx, "AsyncClient", factory):
+            ok = await send_lead_alert(
+                LEAD,
+                ORIGINAL,
+                SOURCE,
+                config=TEST_CONFIG,
+                max_retries=0,
+            )
+
+    reporter.check("alert is delivered through the proxy", ok is True)
+    reporter.check(
+        "AsyncClient receives the resolved proxy URL",
+        captured.get("proxy") == "http://user:pass@196.18.15.173:8000",
+        repr(captured.get("proxy")),
+    )
+
+    captured.clear()
+    with _proxy_env():
+        with mock.patch.object(notifier.httpx, "AsyncClient", factory):
+            ok = await send_lead_alert(
+                LEAD,
+                ORIGINAL,
+                SOURCE,
+                config=TEST_CONFIG,
+                max_retries=0,
+            )
+
+    reporter.check("alert is delivered directly without a proxy", ok is True)
+    reporter.check(
+        "AsyncClient receives proxy=None when unconfigured",
+        captured.get("proxy") is None,
+        repr(captured.get("proxy")),
+    )
+
+
 async def test_live_dispatch(reporter: Reporter) -> None:
     """Optionally send a real alert when the bot credentials are configured."""
-    reporter.section("9. Live dispatch (optional)")
+    reporter.section("11. Live dispatch (optional)")
 
     if os.environ.get("PYTEST_CURRENT_TEST"):
         print("  [SKIP] Live dispatch is disabled under pytest.")
@@ -797,6 +963,8 @@ async def run_suite() -> int:
     await test_network_timeout(reporter)
     await test_server_error_retry(reporter)
     await test_unconfigured(reporter)
+    await test_proxy_configuration(reporter)
+    await test_delivery_uses_proxy(reporter)
     await test_live_dispatch(reporter)
 
     reporter.summary()

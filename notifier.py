@@ -59,7 +59,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -111,6 +111,27 @@ PARSE_MODE: Final[str] = "HTML"
 
 #: Location of the project ``.env`` file (next to this module).
 ENV_FILE: Final[Path] = Path(__file__).resolve().with_name(".env")
+
+#: Proxy environment variables shared with the Telethon client.
+PROXY_TYPE_ENV: Final[str] = "PROXY_TYPE"
+PROXY_HOST_ENV: Final[str] = "PROXY_HOST"
+PROXY_PORT_ENV: Final[str] = "PROXY_PORT"
+PROXY_USER_ENV: Final[str] = "PROXY_USER"
+PROXY_PASS_ENV: Final[str] = "PROXY_PASS"
+
+#: Default proxy scheme. The configured provider only speaks HTTP CONNECT on
+#: the port it advertises as SOCKS5, so ``http`` is the working default.
+DEFAULT_PROXY_TYPE: Final[str] = "http"
+
+#: Proxy schemes accepted by :func:`resolve_proxy_url`.
+SUPPORTED_PROXY_TYPES: Final[frozenset[str]] = frozenset(
+    {"http", "https", "socks5", "socks4"}
+)
+
+#: Hosts that mean "no proxy" — a local listener is not a real egress.
+DIRECT_PROXY_HOSTS: Final[frozenset[str]] = frozenset(
+    {"", "127.0.0.1", "localhost"}
+)
 
 #: Primary environment variable holding the default destination chat id.
 DEFAULT_CHAT_ENV: Final[str] = "TELEGRAM_ALERT_CHAT_ID"
@@ -259,6 +280,64 @@ def read_telegram_config() -> TelegramConfig:
         )
 
     return TelegramConfig(bot_token=token, chat_id=chat_id or "")
+
+
+def resolve_proxy_url() -> str | None:
+    """Build an ``httpx`` proxy URL from the ``PROXY_*`` environment variables.
+
+    The notifier shares the same proxy settings as the Telethon client, so an
+    alert is delivered over the same egress path that already works for the
+    scraper. A proxy is used only when ``PROXY_HOST`` is a non-empty string
+    (after stripping whitespace) that is not a loopback address.
+
+    Returns:
+        A standard proxy URL such as ``http://user:pass@host:port``, or
+        ``None`` when no proxy is configured or the configuration is invalid.
+        This function never raises: a malformed value is logged and treated as
+        "connect directly".
+    """
+    host = _read(PROXY_HOST_ENV)
+    if not host or host.lower() in DIRECT_PROXY_HOSTS:
+        return None
+
+    raw_port = _read(PROXY_PORT_ENV)
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "%s=%r is not an integer — connecting directly.",
+            PROXY_PORT_ENV,
+            raw_port,
+        )
+        return None
+
+    if not 0 < port < 65536:
+        LOGGER.warning(
+            "%s=%d is out of range — connecting directly.",
+            PROXY_PORT_ENV,
+            port,
+        )
+        return None
+
+    scheme = (_read(PROXY_TYPE_ENV) or DEFAULT_PROXY_TYPE).lower()
+    if scheme not in SUPPORTED_PROXY_TYPES:
+        LOGGER.warning(
+            "%s=%r is unsupported — connecting directly.",
+            PROXY_TYPE_ENV,
+            scheme,
+        )
+        return None
+
+    user = _read(PROXY_USER_ENV)
+    password = _read(PROXY_PASS_ENV)
+    auth = ""
+    if user:
+        auth = quote(user, safe="")
+        if password:
+            auth += ":" + quote(password, safe="")
+        auth += "@"
+
+    return f"{scheme}://{auth}{host}:{port}"
 
 
 async def load_telegram_config(
@@ -566,7 +645,24 @@ async def send_lead_alert(
 
     attempts = max(0, int(max_retries)) + 1
     owns_client = client is None
-    http = client if client is not None else httpx.AsyncClient(timeout=cfg.timeout)
+    http: httpx.AsyncClient | None = None
+
+    if client is not None:
+        http = client
+    else:
+        proxy_url = resolve_proxy_url()
+        if proxy_url is not None:
+            LOGGER.info(
+                "Routing Telegram alerts through proxy %s.",
+                proxy_url.rsplit("@", 1)[-1],
+            )
+        try:
+            http = httpx.AsyncClient(proxy=proxy_url, timeout=cfg.timeout)
+        except Exception:
+            # A missing SOCKS backend or an invalid proxy URL must not crash
+            # the scraping pipeline.
+            LOGGER.exception("Could not create the Telegram HTTP client.")
+            return False
 
     try:
         for attempt in range(1, attempts + 1):
@@ -651,7 +747,7 @@ async def send_lead_alert(
             )
             return False
     finally:
-        if owns_client:
+        if owns_client and http is not None:
             await http.aclose()
 
     return False
@@ -702,7 +798,9 @@ __all__ = [
     "DEFAULT_CATEGORY",
     "DEFAULT_CHAT_ENV",
     "DEFAULT_MAX_RETRIES",
+    "DEFAULT_PROXY_TYPE",
     "DEFAULT_TIMEOUT",
+    "DIRECT_PROXY_HOSTS",
     "ENV_FILE",
     "FALLBACK_CHAT_ENV",
     "MAX_CONFIDENCE",
@@ -711,11 +809,18 @@ __all__ = [
     "MAX_SNIPPET_CHARS",
     "MIN_CONFIDENCE",
     "PARSE_MODE",
+    "PROXY_HOST_ENV",
+    "PROXY_PASS_ENV",
+    "PROXY_PORT_ENV",
+    "PROXY_TYPE_ENV",
+    "PROXY_USER_ENV",
     "RETRY_BASE_DELAY",
+    "SUPPORTED_PROXY_TYPES",
     "TelegramConfig",
     "format_alert",
     "load_telegram_config",
     "read_telegram_config",
     "resolve_alert_chat_id",
+    "resolve_proxy_url",
     "send_lead_alert",
 ]

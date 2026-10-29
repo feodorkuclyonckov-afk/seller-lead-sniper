@@ -34,6 +34,7 @@ from typing import Any, Callable, Final, Iterator
 from unittest import mock
 
 import httpx
+import pytest
 
 import notifier
 from notifier import (
@@ -45,6 +46,9 @@ from notifier import (
     read_telegram_config,
     send_lead_alert,
 )
+
+#: Run every async test in this module on the asyncio backend under pytest.
+pytestmark = pytest.mark.anyio
 
 # --------------------------------------------------------------------------- #
 # Fixtures
@@ -138,6 +142,12 @@ class Reporter:
         else:
             print(" All checks passed.")
         print("=" * 76)
+
+
+@pytest.fixture()
+def reporter() -> Reporter:
+    """Provide a fresh :class:`Reporter` for each script-style test."""
+    return Reporter()
 
 
 # --------------------------------------------------------------------------- #
@@ -583,6 +593,10 @@ async def test_live_dispatch(reporter: Reporter) -> None:
     """Optionally send a real alert when the bot credentials are configured."""
     reporter.section("9. Live dispatch (optional)")
 
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        print("  [SKIP] Live dispatch is disabled under pytest.")
+        return
+
     config = await load_telegram_config()
     if not config.is_configured:
         print(
@@ -601,6 +615,109 @@ async def test_live_dispatch(reporter: Reporter) -> None:
         max_retries=1,
     )
     reporter.check("live dispatch returns True", ok is True)
+
+
+# --------------------------------------------------------------------------- #
+# Category-based chat routing (TDD — Red phase)
+# --------------------------------------------------------------------------- #
+
+#: Every environment variable consulted by ``resolve_alert_chat_id``.
+ALERT_ROUTING_ENV_VARS: Final[tuple[str, ...]] = (
+    "TELEGRAM_ALERT_CHAT_ID",
+    "ALERT_CHAT_DEFAULT",
+    "ALERT_CHAT_FULFILLMENT",
+    "ALERT_CHAT_CARGO",
+    "ALERT_CHAT_MARKETING",
+    "ALERT_CHAT_DESIGN",
+)
+
+#: Supported category -> dedicated environment variable.
+CATEGORY_ENV_VARS: Final[dict[str, str]] = {
+    "fulfillment": "ALERT_CHAT_FULFILLMENT",
+    "cargo": "ALERT_CHAT_CARGO",
+    "marketing": "ALERT_CHAT_MARKETING",
+    "design": "ALERT_CHAT_DESIGN",
+}
+
+
+@pytest.fixture()
+def alert_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    """Clear every routing variable so tests never leak into each other."""
+    for name in ALERT_ROUTING_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
+def _resolve_alert_chat_id(category: str | None) -> str:
+    """Invoke the not-yet-implemented resolver (raises ``AttributeError``)."""
+    resolver = getattr(notifier, "resolve_alert_chat_id")
+    return resolver(category)
+
+
+@pytest.mark.parametrize(
+    ("category", "env_var"),
+    sorted(CATEGORY_ENV_VARS.items()),
+)
+def test_resolve_alert_chat_id_routes_supported_category(
+    alert_env: pytest.MonkeyPatch,
+    category: str,
+    env_var: str,
+) -> None:
+    """Each supported category routes to its dedicated chat id."""
+    alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-1009999999999")
+    alert_env.setenv(env_var, f"-100{category}")
+
+    assert _resolve_alert_chat_id(category) == f"-100{category}"
+
+
+def test_resolve_alert_chat_id_missing_category_falls_back(
+    alert_env: pytest.MonkeyPatch,
+) -> None:
+    """``None`` and empty categories fall back to the default chat id."""
+    alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-100default")
+    alert_env.setenv("ALERT_CHAT_CARGO", "-100cargo")
+
+    assert _resolve_alert_chat_id(None) == "-100default"
+    assert _resolve_alert_chat_id("") == "-100default"
+
+
+def test_resolve_alert_chat_id_unknown_category_falls_back(
+    alert_env: pytest.MonkeyPatch,
+) -> None:
+    """An unrecognised category falls back to the default chat id."""
+    alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-100default")
+    alert_env.setenv("ALERT_CHAT_CARGO", "-100cargo")
+
+    assert _resolve_alert_chat_id("unknown_biz") == "-100default"
+
+
+def test_resolve_alert_chat_id_missing_category_env_falls_back(
+    alert_env: pytest.MonkeyPatch,
+) -> None:
+    """A recognised category without its env var falls back gracefully."""
+    alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-100default")
+
+    assert _resolve_alert_chat_id("cargo") == "-100default"
+
+
+def test_resolve_alert_chat_id_empty_category_env_falls_back(
+    alert_env: pytest.MonkeyPatch,
+) -> None:
+    """A blank category env var is treated as unset."""
+    alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-100default")
+    alert_env.setenv("ALERT_CHAT_CARGO", "   ")
+
+    assert _resolve_alert_chat_id("cargo") == "-100default"
+
+
+def test_resolve_alert_chat_id_uses_alert_chat_default(
+    alert_env: pytest.MonkeyPatch,
+) -> None:
+    """``ALERT_CHAT_DEFAULT`` is used when ``TELEGRAM_ALERT_CHAT_ID`` is unset."""
+    alert_env.setenv("ALERT_CHAT_DEFAULT", "-100fallback")
+
+    assert _resolve_alert_chat_id(None) == "-100fallback"
+    assert _resolve_alert_chat_id("unknown_biz") == "-100fallback"
 
 
 # --------------------------------------------------------------------------- #

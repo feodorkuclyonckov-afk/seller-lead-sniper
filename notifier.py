@@ -19,6 +19,9 @@ Public API
     Immutable settings container (``bot_token``, ``chat_id``, ``timeout``).
 ``read_telegram_config()``
     Synchronous reader for the current process environment.
+``resolve_alert_chat_id(category)``
+    Resolve the destination chat id from the environment, preferring a
+    category-specific route over the default chat.
 ``load_telegram_config(env_file)``
     Asynchronously load ``.env`` and return a :class:`TelegramConfig`.
 ``format_alert(lead_data, original_text, source_chat, msg_link)``
@@ -109,6 +112,20 @@ PARSE_MODE: Final[str] = "HTML"
 #: Location of the project ``.env`` file (next to this module).
 ENV_FILE: Final[Path] = Path(__file__).resolve().with_name(".env")
 
+#: Primary environment variable holding the default destination chat id.
+DEFAULT_CHAT_ENV: Final[str] = "TELEGRAM_ALERT_CHAT_ID"
+
+#: Secondary fallback used when :data:`DEFAULT_CHAT_ENV` is unset.
+FALLBACK_CHAT_ENV: Final[str] = "ALERT_CHAT_DEFAULT"
+
+#: Category (lower-case) -> dedicated destination chat environment variable.
+CATEGORY_CHAT_ENV: Final[dict[str, str]] = {
+    "fulfillment": "ALERT_CHAT_FULFILLMENT",
+    "cargo": "ALERT_CHAT_CARGO",
+    "marketing": "ALERT_CHAT_MARKETING",
+    "design": "ALERT_CHAT_DESIGN",
+}
+
 #: Matches a trailing, possibly incomplete HTML entity (``&amp``, ``&#12``).
 _TRAILING_ENTITY_RE: Final[re.Pattern[str]] = re.compile(r"&[a-zA-Z#0-9]*$")
 
@@ -167,6 +184,50 @@ def _normalise_chat_id(raw: str) -> str | None:
     except ValueError:
         return None
     return value
+
+
+def resolve_alert_chat_id(category: str | None = None) -> str:
+    """Resolve the destination Telegram chat id from the environment.
+
+    A recognised ``category`` (see :data:`CATEGORY_CHAT_ENV`) whose dedicated
+    environment variable holds a value wins. Every other case — unknown or
+    missing category, or a blank category variable — falls back to
+    ``TELEGRAM_ALERT_CHAT_ID`` and then ``ALERT_CHAT_DEFAULT``.
+
+    Args:
+        category: Category label from the classifier payload. Matched
+            case-insensitively after stripping surrounding whitespace.
+
+    Returns:
+        The non-empty chat id to deliver the alert to.
+
+    Raises:
+        RuntimeError: When neither a category route nor any fallback chat id
+            is configured.
+    """
+    normalised = (category or "").strip().lower()
+    env_name = CATEGORY_CHAT_ENV.get(normalised) if normalised else None
+
+    if env_name is not None:
+        routed = _read(env_name)
+        if routed:
+            return routed
+        LOGGER.debug(
+            "%s is empty for category %r; falling back to the default chat.",
+            env_name,
+            category,
+        )
+
+    fallback = _read(DEFAULT_CHAT_ENV) or _read(FALLBACK_CHAT_ENV)
+    if fallback:
+        return fallback
+
+    raise RuntimeError(
+        "No destination Telegram chat id is configured — set "
+        f"{DEFAULT_CHAT_ENV}, {FALLBACK_CHAT_ENV}, or a category variable "
+        f"({', '.join(sorted(set(CATEGORY_CHAT_ENV.values())))}) in the "
+        "environment."
+    )
 
 
 def read_telegram_config() -> TelegramConfig:
@@ -443,6 +504,7 @@ async def send_lead_alert(
     config: TelegramConfig | None = None,
     client: httpx.AsyncClient | None = None,
     max_retries: int = DEFAULT_MAX_RETRIES,
+    chat_id: str | None = None,
 ) -> bool:
     """Format and deliver a lead alert to Telegram.
 
@@ -456,27 +518,35 @@ async def send_lead_alert(
         source_chat: Human-readable source chat name.
         msg_link: Optional direct link to the original message.
         config: Optional settings override. When omitted, ``.env`` is loaded
-            asynchronously via :func:`load_telegram_config`.
+            asynchronously via :func:`load_telegram_config` and the destination
+            chat is resolved via :func:`resolve_alert_chat_id` using the lead's
+            category.
         client: Optional pre-built ``httpx.AsyncClient`` (used by tests). When
             omitted, a short-lived client is created and closed per call.
         max_retries: Additional attempts for transient failures. ``0`` means a
             single attempt.
+        chat_id: Optional explicit destination chat id. When given it overrides
+            both ``config.chat_id`` and category routing.
 
     Returns:
         ``True`` when Telegram accepted the message, ``False`` on any failure
         (including missing configuration). Never raises.
     """
     cfg = config if config is not None else await load_telegram_config()
-    if not cfg.is_configured:
+    if not cfg.bot_token:
         LOGGER.warning(
             "Telegram alerting is not configured — set TELEGRAM_BOT_TOKEN and "
-            "TELEGRAM_ALERT_CHAT_ID in .env to enable it."
+            f"{DEFAULT_CHAT_ENV} (or ALERT_CHAT_*) in .env to enable it."
         )
+        return False
+
+    destination = _resolve_destination(cfg, lead_data, chat_id, config)
+    if not destination:
         return False
 
     text = format_alert(lead_data, original_text, source_chat, msg_link)
     payload: dict[str, Any] = {
-        "chat_id": cfg.chat_id,
+        "chat_id": destination,
         "text": text,
         "parse_mode": PARSE_MODE,
         "disable_web_page_preview": True,
@@ -517,7 +587,7 @@ async def send_lead_alert(
 
             if status == 200 and _response_ok(response):
                 LOGGER.info(
-                    "Telegram alert delivered to chat %s.", cfg.chat_id
+                    "Telegram alert delivered to chat %s.", destination
                 )
                 return True
 
@@ -576,12 +646,54 @@ async def send_lead_alert(
     return False
 
 
+def _resolve_destination(
+    config: TelegramConfig,
+    lead_data: object,
+    explicit_chat_id: str | None,
+    explicit_config: TelegramConfig | None,
+) -> str:
+    """Choose the destination chat id for one alert dispatch.
+
+    Precedence: an explicit ``chat_id`` argument, then an explicitly supplied
+    :class:`TelegramConfig`, then category-based environment routing.
+
+    Returns:
+        The chat id to target, or ``""`` when nothing usable is configured
+        (the caller then skips the dispatch).
+    """
+    if explicit_chat_id is not None:
+        value = explicit_chat_id.strip()
+        if not value:
+            LOGGER.warning(
+                "An explicit chat_id was supplied but is blank — skipping alert."
+            )
+        return value
+
+    if explicit_config is not None and config.chat_id:
+        return config.chat_id
+
+    data: Mapping[str, Any] = (
+        lead_data if isinstance(lead_data, Mapping) else {}
+    )
+    raw_category = data.get("category")
+    category = raw_category.strip() if isinstance(raw_category, str) else None
+
+    try:
+        return resolve_alert_chat_id(category)
+    except RuntimeError as exc:
+        LOGGER.warning("Telegram alert skipped: %s", exc)
+        return ""
+
+
 __all__ = [
     "API_BASE",
+    "CATEGORY_CHAT_ENV",
     "DEFAULT_CATEGORY",
+    "DEFAULT_CHAT_ENV",
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_TIMEOUT",
     "ENV_FILE",
+    "FALLBACK_CHAT_ENV",
     "MAX_CONFIDENCE",
     "MAX_MESSAGE_LENGTH",
     "MAX_RETRY_DELAY",
@@ -593,5 +705,6 @@ __all__ = [
     "format_alert",
     "load_telegram_config",
     "read_telegram_config",
+    "resolve_alert_chat_id",
     "send_lead_alert",
 ]

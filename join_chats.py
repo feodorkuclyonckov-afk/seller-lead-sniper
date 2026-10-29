@@ -9,14 +9,22 @@ fulfillment, marketplaces, marketing). The script is deliberately conservative:
 * it reuses the authorized Telethon session created by ``auth_test.py``;
 * it never crashes on a single bad/private/renamed chat;
 * it honours ``FloodWaitError`` and backs off;
-* it sleeps 15-25 seconds between successful joins to avoid spam triggers;
-* it rewrites only the ``TG_MONITOR_CHATS`` line in ``.env``.
+* it sleeps 45-90 seconds between successful joins to avoid spam triggers;
+* it merges successfully resolved chats into the ``TG_MONITOR_CHATS`` line in
+  ``.env`` without dropping entries that are already monitored.
 
 Usage
 -----
 1. Run ``python auth_test.py`` once to authorize the session.
-2. Run ``python join_chats.py``.
+2. Run ``python join_chats.py`` (joins at most ``--limit`` chats, default 10).
 3. Start the listener with ``python main.py --live``.
+
+Useful flags
+------------
+``--dry-run``  Resolve the target chats without joining and leave ``.env``
+               untouched.
+``--limit N``  Process at most ``N`` chats in this batch (default 10). A value
+               of ``0`` exits immediately without touching Telegram.
 
 Exit codes
 ----------
@@ -29,6 +37,7 @@ Exit codes
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import os
@@ -42,6 +51,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.errors import (
     ChannelPrivateError,
+    ChannelsTooMuchError,
     FloodWaitError,
     UserAlreadyParticipantError,
     UsernameInvalidError,
@@ -61,19 +71,35 @@ DEFAULT_SESSION_NAME: str = "session_auth_test"
 MONITOR_CHATS_ENV: str = "TG_MONITOR_CHATS"
 
 #: Curated public B2B/e-commerce chats. Usernames are stored without ``@``.
-#: Edit this tuple to target a different niche.
+#: Edit this tuple to target a different niche. The list is intentionally
+#: ordered so the most relevant marketplace/cargo/fulfillment chats are
+#: processed first when a small ``--limit`` is used.
 TARGET_CHATS: Tuple[str, ...] = (
     "wb_chat_sellers",
-    "cargo_china_chat",
     "fulfillment_russia",
+    "cargo_china_chat",
+    "chat_wildberries_ozon",
+    "sellers_wildberries",
+    "market_place_ru",
+    "wb_sellers_club",
+    "marketplace_help",
+    "chatozonwb",
+    "ff_sklad_wb",
+    "fulfillment_moscow",
+    "chinacargo_chat",
+    "dostavka_iz_kitaya_cargo",
+    "wb_managers",
+    "infografika_wb_ozon",
+    # Previously curated chats kept so the monitored list only ever grows.
     "marketplace_chat_wb_ozon",
     "cargo_chat_moscow",
     "ecom_russia",
 )
 
-#: Delay range (seconds) between successful joins.
-MIN_JOIN_DELAY: float = 15.0
-MAX_JOIN_DELAY: float = 25.0
+#: Delay range (seconds) between successful joins. Kept deliberately wide to
+#: stay well below Telegram's anti-spam thresholds.
+MIN_JOIN_DELAY: float = 45.0
+MAX_JOIN_DELAY: float = 90.0
 
 #: A flood wait longer than this is treated as "skip this chat".
 MAX_FLOOD_WAIT: int = 300
@@ -83,7 +109,11 @@ MAX_JOIN_ATTEMPTS: int = 2
 
 OUTCOME_JOINED: str = "joined"
 OUTCOME_ALREADY: str = "already"
+OUTCOME_RESOLVED: str = "resolved"
 OUTCOME_SKIPPED: str = "skipped"
+
+#: Default number of chats processed per execution batch.
+DEFAULT_LIMIT: int = 10
 
 EXIT_OK: int = 0
 EXIT_CONFIG_ERROR: int = 1
@@ -111,6 +141,10 @@ class ConfigError(RuntimeError):
 
 class AuthError(RuntimeError):
     """Raised when the Telethon session is not authorized."""
+
+
+class AccountLimitReached(RuntimeError):
+    """Raised when Telegram reports the account has joined too many channels."""
 
 
 def configure_logging() -> None:
@@ -251,21 +285,34 @@ def build_proxy() -> ProxyConfig:
     return proxy
 
 
-async def _join_one(client: TelegramClient, username: str) -> str:
+async def _join_one(
+    client: TelegramClient, username: str, dry_run: bool = False
+) -> str:
     """Attempt to join ``username`` and return an outcome constant.
 
     ``client.get_entity`` resolves the public username first; the actual join
     is performed with ``JoinChannelRequest``. Existing membership surfaces as
     ``UserAlreadyParticipantError``, which is the canonical "already joined"
     signal in Telethon.
+
+    When ``dry_run`` is true the entity is resolved but no join request is
+    sent, and ``OUTCOME_RESOLVED`` is returned.
+
+    Raises:
+        AccountLimitReached: if Telegram reports that the account has joined
+            the maximum number of channels.
     """
     for attempt in range(1, MAX_JOIN_ATTEMPTS + 1):
         try:
             entity = await client.get_entity(username)
+            if dry_run:
+                return OUTCOME_RESOLVED
             await client(JoinChannelRequest(entity))
             return OUTCOME_JOINED
         except UserAlreadyParticipantError:
             return OUTCOME_ALREADY
+        except ChannelsTooMuchError as exc:
+            raise AccountLimitReached(str(exc)) from exc
         except FloodWaitError as exc:
             seconds = int(getattr(exc, "seconds", 0) or 0)
             if seconds > MAX_FLOOD_WAIT:
@@ -305,21 +352,41 @@ async def _join_one(client: TelegramClient, username: str) -> str:
     return OUTCOME_SKIPPED
 
 
-async def join_targets(client: TelegramClient) -> Tuple[list[str], list[str]]:
-    """Join every target chat, returning ``(joined_or_verified, skipped)``."""
+async def join_targets(
+    client: TelegramClient, limit: int, dry_run: bool = False
+) -> Tuple[list[str], list[str]]:
+    """Join up to ``limit`` target chats, returning ``(resolved, skipped)``.
+
+    ``resolved`` contains chats that were joined, were already joined, or (in
+    dry-run mode) resolved successfully. Processing stops early if Telegram
+    reports that the account has reached its channel limit.
+    """
     joined: list[str] = []
     skipped: list[str] = []
-    total = len(TARGET_CHATS)
+    targets = TARGET_CHATS[: max(limit, 0)]
+    total = len(targets)
 
-    for index, username in enumerate(TARGET_CHATS, start=1):
+    for index, username in enumerate(targets, start=1):
         LOGGER.info("Processing %d/%d: %s", index, total, username)
-        outcome = await _join_one(client, username)
+        try:
+            outcome = await _join_one(client, username, dry_run=dry_run)
+        except AccountLimitReached as exc:
+            LOGGER.error(
+                "Account channel limit reached (%s); stopping after %d chat(s).",
+                exc,
+                len(joined),
+            )
+            print("[-] Account channel limit reached; stopping.")
+            break
 
         if outcome == OUTCOME_JOINED:
             print(f"[+] Successfully joined: {username}")
             joined.append(username)
         elif outcome == OUTCOME_ALREADY:
             print(f"[*] Already member: {username}")
+            joined.append(username)
+        elif outcome == OUTCOME_RESOLVED:
+            print(f"[*] Resolved (dry-run): {username}")
             joined.append(username)
         else:
             print(f"[-] Skipped: {username}")
@@ -334,13 +401,34 @@ async def join_targets(client: TelegramClient) -> Tuple[list[str], list[str]]:
     return joined, skipped
 
 
-def update_env_file(env_path: Path, usernames: Sequence[str]) -> str:
-    """Replace or append ``TG_MONITOR_CHATS`` in ``env_path``.
+def _read_monitor_chats(env_path: Path) -> list[str]:
+    """Return the current ``TG_MONITOR_CHATS`` entries from ``env_path``."""
+    if not env_path.is_file():
+        return []
+    pattern = re.compile(
+        rf"^\s*(?:export\s+)?{re.escape(MONITOR_CHATS_ENV)}\s*=(.*)$"
+    )
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(line)
+        if match:
+            raw = match.group(1).strip().strip('"').strip("'")
+            return [item.strip() for item in raw.split(",") if item.strip()]
+    return []
 
-    Existing variables, comments and line endings are preserved; only the
-    ``TG_MONITOR_CHATS`` line is touched. Returns the new value.
+
+def update_env_file(env_path: Path, usernames: Sequence[str]) -> str:
+    """Merge ``usernames`` into ``TG_MONITOR_CHATS`` in ``env_path``.
+
+    Existing entries are preserved so the monitored list only ever grows;
+    duplicates are removed while keeping first-seen order. Existing variables,
+    comments and line endings are preserved; only the ``TG_MONITOR_CHATS``
+    line is touched. Returns the new value.
     """
-    value = ",".join(usernames)
+    merged: list[str] = []
+    for name in [*_read_monitor_chats(env_path), *usernames]:
+        if name not in merged:
+            merged.append(name)
+    value = ",".join(merged)
     new_line = f"{MONITOR_CHATS_ENV}={value}"
     pattern = re.compile(
         rf"^\s*(?:export\s+)?{re.escape(MONITOR_CHATS_ENV)}\s*="
@@ -372,9 +460,15 @@ def update_env_file(env_path: Path, usernames: Sequence[str]) -> str:
     return value
 
 
-async def run() -> int:
+async def run(args: argparse.Namespace) -> int:
     """Connect, join the target chats and persist the result to ``.env``."""
     load_environment()
+
+    if args.limit <= 0:
+        LOGGER.info("--limit 0: no chats to process.")
+        print("[*] Limit is 0; nothing to do.")
+        return EXIT_OK
+
     api_id, api_hash = read_api_credentials()
     session_name = read_session_name()
     proxy = build_proxy()
@@ -402,11 +496,20 @@ async def run() -> int:
                 me.id,
             )
 
-        joined, skipped = await join_targets(client)
+        joined, skipped = await join_targets(
+            client, limit=args.limit, dry_run=args.dry_run
+        )
     finally:
         if client.is_connected():
             await client.disconnect()
             LOGGER.info("Disconnected from Telegram.")
+
+    if args.dry_run:
+        print()
+        print("[*] Dry-run complete; .env was not modified.")
+        if skipped:
+            print(f"[*] Skipped {len(skipped)} chat(s): {', '.join(skipped)}")
+        return EXIT_OK
 
     if not joined:
         print()
@@ -423,11 +526,41 @@ async def run() -> int:
     return EXIT_OK
 
 
-def main() -> int:
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    """Parse CLI flags for a controlled join batch."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Safely join curated B2B/e-commerce Telegram chats and merge the "
+            "resolved usernames into TG_MONITOR_CHATS in .env."
+        )
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve target chats without joining and leave .env untouched.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_LIMIT,
+        metavar="N",
+        help=(
+            "Maximum number of chats to process in this batch "
+            f"(default: {DEFAULT_LIMIT}; 0 exits immediately)."
+        ),
+    )
+    args = parser.parse_args(argv)
+    if args.limit < 0:
+        parser.error("--limit must be greater than or equal to 0")
+    return args
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
     """Synchronous CLI wrapper translating failures into exit codes."""
     configure_logging()
+    args = parse_args(argv)
     try:
-        return asyncio.run(run())
+        return asyncio.run(run(args))
     except ConfigError as exc:
         LOGGER.error("%s", exc)
         return EXIT_CONFIG_ERROR

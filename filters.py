@@ -2,19 +2,20 @@
 
 Purpose
 -------
-Only a small fraction of scraped messages are actual clients looking for a
-contractor. Running every message through a paid LLM is wasteful, so this
-module applies three cheap checks *before* the message ever leaves the
-machine:
+Only a small fraction of scraped messages are marketplace sellers in real
+pain: margin losses, unexpected fees and forced auto-actions. Running every
+message through a paid LLM is wasteful, so this module applies three cheap
+checks *before* the message ever leaves the machine:
 
-1. **Length** — trivially short ("+", "цена?") and wall-of-text posts are
+1. **Length** — trivially short ("Где склад?") and wall-of-text posts are
    never useful leads.
-2. **Stop words** — seller self-promotion, course ads, "продам базу" spam.
-3. **Trigger words** — explicit Russian demand/inquiry stems ("ищу",
-   "посоветуйте", "кто возит", ...). No trigger means no lead.
+2. **Stop words** — agency offers, growth-hack ads, course sales and
+   "пишите в личку" spam.
+3. **Trigger words** — stems describing WB/Ozon seller pain ("автоакци",
+   "штраф", "в минус", ...). No trigger means no lead.
 
 All matching is performed on ``text.lower()`` and is substring-based (stems
-are used on purpose so that "ищу"/"ищет"/"ищем" all match with one token).
+are used on purpose so that "штраф"/"штрафы"/"штрафа" all match one token).
 
 Public API
 ----------
@@ -27,131 +28,64 @@ from __future__ import annotations
 from typing import Final
 
 #: Minimum meaningful message length (characters) — shorter posts are noise.
-MIN_LENGTH: Final[int] = 25
+MIN_LENGTH: Final[int] = 30
 
 #: Maximum message length (characters) — longer posts are usually essays or
-#: channel digests rather than concrete requests.
-MAX_LENGTH: Final[int] = 850
+#: channel digests rather than concrete complaints.
+MAX_LENGTH: Final[int] = 900
 
-#: Stems that signal an explicit demand, inquiry or request for a contractor.
+#: Stems that signal an explicit WB/Ozon seller pain point: forced
+#: auto-actions, tariff hikes, penalties and margin bleed.
 #: Stored lowercase; each entry is matched as a plain substring.
 TRIGGER_WORDS: Final[tuple[str, ...]] = (
-    # Direct search / request verbs
-    "ищу",
-    "ищем",
-    "ищет",
-    "посоветуйте",
-    "порекомендуйте",
-    "подскажите",
-    "порекомендуете",
-    "посоветуете",
-    "кто подскажет",
-    "кто посоветует",
-    "кто порекомендует",
-    # "Who does X?" phrasing
-    "кто занимается",
-    "кто возит",
-    "кто может",
-    "кто поможет",
-    "кто делает",
-    "кто работает с",
-    "кто оказывает",
-    "кто-нибудь",
-    "есть кто",
-    # Explicit need
-    "нужен",
-    "нужна",
-    "нужно",
-    "нужны",
-    "требуется",
-    "требуются",
-    "интересует",
-    "интересуют",
-    "рассматриваю",
-    # Sourcing vocabulary typical for cargo / e-commerce / marketing
-    "ищу подрядчика",
-    "ищем подрядчика",
-    "ищу поставщика",
-    "ищем поставщика",
-    "ищу перевозчика",
-    "ищу карго",
-    "нужен карго",
-    "нужна доставка",
-    "нужна перевозка",
-    "ищу маркетолога",
-    "ищу таргетолога",
-    "нужен специалист",
-    "нужны услуги",
-    "нужна помощь",
-    "где заказать",
-    "где найти",
-    "где искать",
+    # Auto-actions & pricing pressure
+    "автоакци",
+    "принудительн",
+    "скидк",
+    "спп",
+    "слетел цен",
+    "сбросил цен",
+    "демпинг",
+    # Logistics & tariffs
+    "логистик",
+    "коэффициент",
+    "кхв",
+    "коэф",
+    "хранен",
+    "приемк",
+    "завысил габарит",
+    "перемер",
+    # Penalties & deductions
+    "штраф",
+    "удержан",
+    "кбжу",
+    "самовыкуп",
+    "отчет реализаци",
+    "минус в отчете",
+    # Unit-economics drain
+    "в минус",
+    "убыт",
+    "слив марж",
+    "себестоимост",
+    "съел прибыль",
+    "кассовый разрыв",
 )
 
-#: Stems that signal spam or seller self-promotion. Anything matching one of
-#: these is discarded before the trigger check, so an ad that also contains
-#: "нужен" cannot slip through.
+#: Stems that signal marketplace spam or agency offers. Anything matching one
+#: of these is discarded before the trigger check, so an agency ad that also
+#: mentions "штраф" or "логистик" cannot slip through.
 STOP_WORDS: Final[tuple[str, ...]] = (
-    # Self-promotion / "I offer my services"
     "предлагаю услуги",
-    "предлагаю сотрудничество",
-    "мои услуги",
-    "моя команда",
-    "мы предлагаем",
-    "оказываем услуги",
-    "оказываю услуги",
-    "готовы предложить",
-    "готов предложить",
-    "возьму на ведение",
-    "возьму ваш проект",
-    # Portfolio / case-study bait
-    "мои кейсы",
-    "мой кейс",
-    "кейсы в закрепе",
-    "портфолио",
-    "отзывы в профиле",
-    # Sales funnel / CTA spam
-    "бесплатная консультация",
-    "бесплатный разбор",
-    "пишите в личку",
-    "писать в личку",
-    "ссылка в профиле",
-    "приглашаю в канал",
-    "приглашаю в чат",
-    "подписывайтесь",
-    "записывайтесь",
-    "мест ограничено",
-    "только сегодня",
-    "скидка",
-    "акция",
-    "вебинар",
-    "интенсив",
-    "марафон",
-    # Course / mentorship sales
-    "набираю учеников",
-    "набираю команду",
-    "обучение с нуля",
-    "наставничество",
+    "выведу в топ",
+    "накрутк",
+    "продвижени",
+    "инфографик",
+    "оформление карточек",
     "курс по",
-    "продаю курс",
-    "моя школа",
-    "личное сопровождение",
-    # Lead-database / growth-hack spam
-    "продам базу",
-    "продаю базу",
-    "свежие базы",
-    "база клиентов",
-    "база контактов",
-    "базы telegram",
-    "партнерская программа",
-    "партнёрская программа",
-    "реферальная",
-    "накрутка",
-    "накручу",
-    "гарантированный результат",
-    "ищу клиентов",
-    "заработай",
-    "доход от",
+    "байер",
+    "фулфилмент москва",
+    "пишите в лс",
+    "пишите в личку",
 )
 
 
@@ -172,7 +106,7 @@ def passes_local_filter(text: str) -> bool:
        ``len(text) > MAX_LENGTH``.
     2. Stop-word check — reject if any :data:`STOP_WORDS` entry occurs in
        ``text.lower()``.
-    3. Trigger-word check — reject if *none* of :data:`TRIGGER_WORDS` occur in
+    3. Pain-point check — reject if *none* of :data:`TRIGGER_WORDS` occur in
        ``text.lower()``.
 
     Args:
@@ -195,11 +129,11 @@ def passes_local_filter(text: str) -> bool:
 
     lowered = text.lower()
 
-    # 2. Seller spam / self-promotion gate.
+    # 2. Marketplace spam / agency-offer gate.
     if _first_match(lowered, STOP_WORDS) is not None:
         return False
 
-    # 3. Explicit demand gate.
+    # 3. Seller pain-point gate.
     if _first_match(lowered, TRIGGER_WORDS) is None:
         return False
 

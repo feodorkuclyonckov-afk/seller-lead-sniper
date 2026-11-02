@@ -1,4 +1,4 @@
-"""Sprint 3 — verification of the async LLM lead classifier.
+"""Sprint 3 — verification of the async LLM seller-pain classifier.
 
 Run with::
 
@@ -49,8 +49,8 @@ from classifier import (
 # --------------------------------------------------------------------------- #
 
 GENUINE_REQUEST: Final[str] = (
-    "Ищу карго из Китая в Москву, кто занимается доставкой под ключ? "
-    "Нужен надёжный подрядчик."
+    "Вчера WB списал 47 000 за логистику и перемеры, маржа ушла в минус. "
+    "Кто сталкивался, как оспорить удержания?"
 )
 
 TEST_CONFIG: Final[LLMConfig] = LLMConfig(
@@ -68,8 +68,8 @@ def _valid_payload() -> dict[str, Any]:
     """Return a well-formed classifier payload."""
     return {
         "is_lead": True,
-        "category": "Карго / Логистика",
-        "summary": "Поиск карго из Китая в Москву",
+        "category": "Штрафы / Удержания",
+        "summary": "Списание за логистику и перемеры",
         "confidence": 9,
     }
 
@@ -324,8 +324,8 @@ async def test_parsing_and_normalisation(reporter: Reporter) -> None:
             json.dumps(
                 {
                     "is_lead": True,
-                    "category": "Юристы",
-                    "summary": "Нужен юрист по договорам",
+                    "category": "Права продавцов",
+                    "summary": "Спор по штрафам маркетплейса",
                     "confidence": 6,
                 },
                 ensure_ascii=False,
@@ -333,7 +333,7 @@ async def test_parsing_and_normalisation(reporter: Reporter) -> None:
             {
                 "is_lead": True,
                 "category": "Другое",
-                "summary": "Нужен юрист по договорам",
+                "summary": "Спор по штрафам маркетплейса",
                 "confidence": 6,
             },
         ),
@@ -342,16 +342,16 @@ async def test_parsing_and_normalisation(reporter: Reporter) -> None:
             json.dumps(
                 {
                     "is_lead": True,
-                    "category": "карго / логистика",
-                    "summary": "Доставка груза из Китая",
+                    "category": "штрафы / удержания",
+                    "summary": "Неожиданный штраф за перемер габаритов",
                     "confidence": 8,
                 },
                 ensure_ascii=False,
             ),
             {
                 "is_lead": True,
-                "category": "Карго / Логистика",
-                "summary": "Доставка груза из Китая",
+                "category": "Штрафы / Удержания",
+                "summary": "Неожиданный штраф за перемер габаритов",
                 "confidence": 8,
             },
         ),
@@ -360,16 +360,16 @@ async def test_parsing_and_normalisation(reporter: Reporter) -> None:
             json.dumps(
                 {
                     "is_lead": True,
-                    "category": "Фулфилмент",
-                    "summary": "Сборка заказов на складе",
+                    "category": "Автоакция / Цены",
+                    "summary": "Принудительная автоакция срезала цены",
                     "confidence": 42,
                 },
                 ensure_ascii=False,
             ),
             {
                 "is_lead": True,
-                "category": "Фулфилмент",
-                "summary": "Сборка заказов на складе",
+                "category": "Автоакция / Цены",
+                "summary": "Принудительная автоакция срезала цены",
                 "confidence": 10,
             },
         ),
@@ -379,7 +379,7 @@ async def test_parsing_and_normalisation(reporter: Reporter) -> None:
                 {
                     "is_lead": False,
                     "category": "Другое",
-                    "summary": "Просто сообщение в чате",
+                    "summary": "Общие новости маркетплейса без потерь",
                     "confidence": -5,
                 },
                 ensure_ascii=False,
@@ -387,7 +387,7 @@ async def test_parsing_and_normalisation(reporter: Reporter) -> None:
             {
                 "is_lead": False,
                 "category": "Другое",
-                "summary": "Просто сообщение в чате",
+                "summary": "Общие новости маркетплейса без потерь",
                 "confidence": 1,
             },
         ),
@@ -396,16 +396,16 @@ async def test_parsing_and_normalisation(reporter: Reporter) -> None:
             json.dumps(
                 {
                     "is_lead": True,
-                    "category": "Маркетинг / Трафик",
-                    "summary": "Нужен таргетолог для магазина",
+                    "category": "Логистика / Хранение",
+                    "summary": "Скачок коэффициентов склада Ozon",
                     "confidence": "7",
                 },
                 ensure_ascii=False,
             ),
             {
                 "is_lead": True,
-                "category": "Маркетинг / Трафик",
-                "summary": "Нужен таргетолог для магазина",
+                "category": "Логистика / Хранение",
+                "summary": "Скачок коэффициентов склада Ozon",
                 "confidence": 7,
             },
         ),
@@ -414,7 +414,7 @@ async def test_parsing_and_normalisation(reporter: Reporter) -> None:
             json.dumps(
                 {
                     "is_lead": True,
-                    "category": "Дизайн / Контент",
+                    "category": "Слив маржи / Убыток",
                     "summary": long_summary,
                     "confidence": 5,
                 },
@@ -422,7 +422,7 @@ async def test_parsing_and_normalisation(reporter: Reporter) -> None:
             ),
             {
                 "is_lead": True,
-                "category": "Дизайн / Контент",
+                "category": "Слив маржи / Убыток",
                 "summary": " ".join(long_summary.split()[:8]),
                 "confidence": 5,
             },
@@ -432,16 +432,16 @@ async def test_parsing_and_normalisation(reporter: Reporter) -> None:
             json.dumps(
                 {
                     "is_lead": "true",
-                    "category": "Фулфилмент",
-                    "summary": "Нужен фулфилмент для маркетплейса",
+                    "category": "Автоакция / Цены",
+                    "summary": "Неучтённые скидки съели всю маржу",
                     "confidence": 8,
                 },
                 ensure_ascii=False,
             ),
             {
                 "is_lead": True,
-                "category": "Фулфилмент",
-                "summary": "Нужен фулфилмент для маркетплейса",
+                "category": "Автоакция / Цены",
+                "summary": "Неучтённые скидки съели всю маржу",
                 "confidence": 8,
             },
         ),
@@ -451,7 +451,7 @@ async def test_parsing_and_normalisation(reporter: Reporter) -> None:
                 {
                     "is_lead": "нет",
                     "category": "Другое",
-                    "summary": "Реклама курса по маркетингу",
+                    "summary": "Реклама курса по продажам",
                     "confidence": 2,
                 },
                 ensure_ascii=False,
@@ -459,7 +459,25 @@ async def test_parsing_and_normalisation(reporter: Reporter) -> None:
             {
                 "is_lead": False,
                 "category": "Другое",
-                "summary": "Реклама курса по маркетингу",
+                "summary": "Реклама курса по продажам",
+                "confidence": 2,
+            },
+        ),
+        (
+            "low confidence is preserved for weak leads",
+            json.dumps(
+                {
+                    "is_lead": True,
+                    "category": "Слив маржи / Убыток",
+                    "summary": "Похоже на временную просадку маржи",
+                    "confidence": 2,
+                },
+                ensure_ascii=False,
+            ),
+            {
+                "is_lead": True,
+                "category": "Слив маржи / Убыток",
+                "summary": "Похоже на временную просадку маржи",
                 "confidence": 2,
             },
         ),

@@ -1,20 +1,51 @@
+# ---------------------------------------------------------------------------
 # Secrets
+# ---------------------------------------------------------------------------
 .env
+.env.*
+!.env.example
 
 # Telethon session files (contain auth keys — treat as credentials)
-*.session
+*.session*
 *.session-journal
 
-# Local deduplication cache (regenerated at runtime)
-*.db
+# Pending login state (phone number + phone_code_hash)
+.auth_pending.json
+
+# Rendered QR login token (short-lived credential) and its atomic-write temp
+qr.png
+qr.png.tmp
+
+# Local deduplication database (regenerated at runtime)
+*.db*
 *.db-wal
 *.db-shm
 
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 .venv/
 venv/
+env/
 
+# Local / OS noise
+.DS_Store
+Thumbs.db
+*.log
+
+# Editor / tooling
 .vscode/
+.idea/
+.roo/
+.clinerules
+
+# Local operational helpers (not part of the service)
 _vps.py
+_*.py
+_*.sh
+_*.log
+run_*.sh
+journal_scan.sh
+verify_bot.py
+openrouter_probe.py

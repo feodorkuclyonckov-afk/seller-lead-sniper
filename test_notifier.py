@@ -56,19 +56,19 @@ pytestmark = pytest.mark.anyio
 
 LEAD: Final[dict[str, Any]] = {
     "is_lead": True,
-    "category": "Карго / Логистика",
-    "summary": "Поиск карго из Китая в Москву",
+    "category": "Слив маржи / Убыток",
+    "summary": "Маржа упала до 3% из-за автоакции Ozon",
     "confidence": 9,
 }
 
 ORIGINAL: Final[str] = (
-    "Ищу карго из Китая в Москву, кто занимается доставкой под ключ? "
-    "Нужен надёжный подрядчик."
+    "Ozon включил автоакцию, маржа упала до 3%. "
+    "Кто сталкивался, как отключить?"
 )
 
-SOURCE: Final[str] = "Карго Чат Москва"
+SOURCE: Final[str] = "WB / Ozon Селлеры"
 
-LINK: Final[str] = "https://t.me/cargo_chat/12345"
+LINK: Final[str] = "https://t.me/seller_chat/12345"
 
 TEST_CONFIG: Final[TelegramConfig] = TelegramConfig(
     bot_token="123456:TEST-TOKEN",
@@ -257,31 +257,42 @@ async def test_format_alert(reporter: Reporter) -> None:
     text = format_alert(LEAD, ORIGINAL, SOURCE, LINK)
 
     reporter.check(
+        "header announces seller margin loss",
+        "Селлер теряет маржу!" in text,
+    )
+    reporter.check(
         "header contains the category",
-        "Карго / Логистика" in text,
+        "Слив маржи / Убыток" in text,
     )
     reporter.check(
         "header contains the confidence score",
         "Рейтинг: 9/10" in text,
     )
     reporter.check(
-        "summary is rendered in bold",
-        "<b>Поиск карго из Китая в Москву</b>" in text,
+        "summary is rendered under the pain field",
+        "Боль / Суть:" in text and "Маржа упала до 3%" in text,
     )
-    reporter.check("source chat is present", SOURCE in text)
+    reporter.check(
+        "source chat is rendered under the chat field",
+        "Чат:" in text and SOURCE in text,
+    )
     reporter.check(
         "message link is rendered as an anchor",
-        f'href="{LINK}"' in text and "Открыть сообщение" in text,
+        f'href="{LINK}"' in text and "Перейти к сообщению" in text,
     )
     reporter.check(
         "original text is quoted",
-        "<blockquote>" in text and "Ищу карго" in text,
+        "<blockquote>" in text and "Ozon включил автоакцию" in text,
+    )
+    reporter.check(
+        "footer contains the expert advice tip",
+        "💡 Совет:" in text and "@marginkeeper_bot" in text,
     )
 
     no_link = format_alert(LEAD, ORIGINAL, SOURCE)
     reporter.check(
-        "missing link omits the link line",
-        "Открыть сообщение" not in no_link and "href=" not in no_link,
+        "missing link keeps the link field without an anchor",
+        "Ссылка:" in no_link and "href=" not in no_link,
     )
 
     invalid_link = format_alert(LEAD, ORIGINAL, SOURCE, "javascript:alert(1)")
@@ -292,7 +303,7 @@ async def test_format_alert(reporter: Reporter) -> None:
 
     escaped = format_alert(
         {
-            "category": "<b>Карго</b> & Логистика",
+            "category": "<b>Слив</b> & Маржа",
             "summary": "A < B & C",
             "confidence": 7,
         },
@@ -302,7 +313,7 @@ async def test_format_alert(reporter: Reporter) -> None:
     )
     reporter.check(
         "category is HTML-escaped",
-        html.escape("<b>Карго</b> & Логистика", quote=False) in escaped,
+        html.escape("<b>Слив</b> & Маржа", quote=False) in escaped,
     )
     reporter.check(
         "summary is HTML-escaped",
@@ -350,10 +361,10 @@ async def test_format_alert(reporter: Reporter) -> None:
     fallback_summary = format_alert({"category": "Другое"}, ORIGINAL, SOURCE)
     reporter.check(
         "missing summary falls back to the original text",
-        "Ищу карго" in fallback_summary,
+        "Ozon включил автоакцию" in fallback_summary,
     )
 
-    long_text = "Нужен карго из Китая в Москву. " * 1000
+    long_text = "Маржа падает из-за автоакции Ozon. " * 1000
     long_alert = format_alert(LEAD, long_text, SOURCE)
     reporter.check(
         "long snippet is truncated with an ellipsis",
@@ -371,6 +382,15 @@ async def test_format_alert(reporter: Reporter) -> None:
         "message body never exceeds Telegram's 4096-char limit",
         len(huge) <= MAX_MESSAGE_LENGTH,
         str(len(huge)),
+    )
+    reporter.check(
+        "truncated body keeps HTML tags balanced",
+        huge.count("<blockquote>") == huge.count("</blockquote>")
+        and huge.count("<i>") == huge.count("</i>")
+        and huge.count("<b>") == huge.count("</b>"),
+        f"blockquote={huge.count('<blockquote>')}/{huge.count('</blockquote>')}, "
+        f"i={huge.count('<i>')}/{huge.count('</i>')}, "
+        f"b={huge.count('<b>')}/{huge.count('</b>')}",
     )
 
 
@@ -426,7 +446,11 @@ async def test_delivery_success(reporter: Reporter) -> None:
         )
         reporter.check(
             "payload contains the formatted alert",
-            "Карго / Логистика" in payload.get("text", ""),
+            "Слив маржи / Убыток" in payload.get("text", ""),
+        )
+        reporter.check(
+            "payload contains the advice footer",
+            "@marginkeeper_bot" in payload.get("text", ""),
         )
         reporter.check(
             "link previews are disabled",
@@ -633,16 +657,16 @@ async def test_proxy_configuration(reporter: Reporter) -> None:
     with _proxy_env(
         {
             "PROXY_TYPE": "http",
-            "PROXY_HOST": "196.18.15.173",
+            "PROXY_HOST": "192.0.2.10",
             "PROXY_PORT": "8000",
-            "PROXY_USER": "WjFyem",
-            "PROXY_PASS": "aaK5a3",
+            "PROXY_USER": "sniper-user",
+            "PROXY_PASS": "s3cret-pass",
         }
     ):
         reporter.check(
             "authenticated HTTP proxy URL is built",
             notifier.resolve_proxy_url()
-            == "http://WjFyem:aaK5a3@196.18.15.173:8000",
+            == "http://sniper-user:s3cret-pass@192.0.2.10:8000",
             repr(notifier.resolve_proxy_url()),
         )
 
@@ -714,7 +738,7 @@ async def test_delivery_uses_proxy(reporter: Reporter) -> None:
     with _proxy_env(
         {
             "PROXY_TYPE": "http",
-            "PROXY_HOST": "196.18.15.173",
+            "PROXY_HOST": "192.0.2.10",
             "PROXY_PORT": "8000",
             "PROXY_USER": "user",
             "PROXY_PASS": "pass",
@@ -732,7 +756,7 @@ async def test_delivery_uses_proxy(reporter: Reporter) -> None:
     reporter.check("alert is delivered through the proxy", ok is True)
     reporter.check(
         "AsyncClient receives the resolved proxy URL",
-        captured.get("proxy") == "http://user:pass@196.18.15.173:8000",
+        captured.get("proxy") == "http://user:pass@192.0.2.10:8000",
         repr(captured.get("proxy")),
     )
 
@@ -791,18 +815,18 @@ async def test_live_dispatch(reporter: Reporter) -> None:
 ALERT_ROUTING_ENV_VARS: Final[tuple[str, ...]] = (
     "TELEGRAM_ALERT_CHAT_ID",
     "ALERT_CHAT_DEFAULT",
-    "ALERT_CHAT_FULFILLMENT",
-    "ALERT_CHAT_CARGO",
-    "ALERT_CHAT_MARKETING",
-    "ALERT_CHAT_DESIGN",
+    "ALERT_CHAT_PRICING",
+    "ALERT_CHAT_LOGISTICS",
+    "ALERT_CHAT_PENALTIES",
+    "ALERT_CHAT_MARGIN",
 )
 
-#: Supported category -> dedicated environment variable.
+#: Supported marketplace category -> dedicated environment variable.
 CATEGORY_ENV_VARS: Final[dict[str, str]] = {
-    "fulfillment": "ALERT_CHAT_FULFILLMENT",
-    "cargo": "ALERT_CHAT_CARGO",
-    "marketing": "ALERT_CHAT_MARKETING",
-    "design": "ALERT_CHAT_DESIGN",
+    "Автоакция / Цены": "ALERT_CHAT_PRICING",
+    "Логистика / Хранение": "ALERT_CHAT_LOGISTICS",
+    "Штрафы / Удержания": "ALERT_CHAT_PENALTIES",
+    "Слив маржи / Убыток": "ALERT_CHAT_MARGIN",
 }
 
 
@@ -815,7 +839,7 @@ def alert_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
 
 
 def _resolve_alert_chat_id(category: str | None) -> str:
-    """Invoke the not-yet-implemented resolver (raises ``AttributeError``)."""
+    """Invoke the resolver with a category label."""
     resolver = getattr(notifier, "resolve_alert_chat_id")
     return resolver(category)
 
@@ -829,11 +853,32 @@ def test_resolve_alert_chat_id_routes_supported_category(
     category: str,
     env_var: str,
 ) -> None:
-    """Each supported category routes to its dedicated chat id."""
+    """Each supported marketplace category routes to its dedicated chat id."""
     alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-1009999999999")
-    alert_env.setenv(env_var, f"-100{category}")
+    alert_env.setenv(env_var, f"-100{env_var.lower()}")
 
-    assert _resolve_alert_chat_id(category) == f"-100{category}"
+    assert _resolve_alert_chat_id(category) == f"-100{env_var.lower()}"
+
+
+@pytest.mark.parametrize(
+    ("category", "env_var"),
+    sorted(CATEGORY_ENV_VARS.items()),
+)
+def test_resolve_alert_chat_id_category_is_normalised(
+    alert_env: pytest.MonkeyPatch,
+    category: str,
+    env_var: str,
+) -> None:
+    """Category labels match case-insensitively and ignore surrounding spaces."""
+    alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-1009999999999")
+    alert_env.setenv(env_var, f"-100{env_var.lower()}")
+
+    assert _resolve_alert_chat_id(f"  {category.upper()}  ") == (
+        f"-100{env_var.lower()}"
+    )
+    assert _resolve_alert_chat_id(f"\t{category.lower()}\n") == (
+        f"-100{env_var.lower()}"
+    )
 
 
 def test_resolve_alert_chat_id_missing_category_falls_back(
@@ -841,7 +886,7 @@ def test_resolve_alert_chat_id_missing_category_falls_back(
 ) -> None:
     """``None`` and empty categories fall back to the default chat id."""
     alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-100default")
-    alert_env.setenv("ALERT_CHAT_CARGO", "-100cargo")
+    alert_env.setenv("ALERT_CHAT_MARGIN", "-100margin")
 
     assert _resolve_alert_chat_id(None) == "-100default"
     assert _resolve_alert_chat_id("") == "-100default"
@@ -852,7 +897,7 @@ def test_resolve_alert_chat_id_unknown_category_falls_back(
 ) -> None:
     """An unrecognised category falls back to the default chat id."""
     alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-100default")
-    alert_env.setenv("ALERT_CHAT_CARGO", "-100cargo")
+    alert_env.setenv("ALERT_CHAT_MARGIN", "-100margin")
 
     assert _resolve_alert_chat_id("unknown_biz") == "-100default"
 
@@ -863,7 +908,7 @@ def test_resolve_alert_chat_id_missing_category_env_falls_back(
     """A recognised category without its env var falls back gracefully."""
     alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-100default")
 
-    assert _resolve_alert_chat_id("cargo") == "-100default"
+    assert _resolve_alert_chat_id("Слив маржи / Убыток") == "-100default"
 
 
 def test_resolve_alert_chat_id_empty_category_env_falls_back(
@@ -871,9 +916,9 @@ def test_resolve_alert_chat_id_empty_category_env_falls_back(
 ) -> None:
     """A blank category env var is treated as unset."""
     alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-100default")
-    alert_env.setenv("ALERT_CHAT_CARGO", "   ")
+    alert_env.setenv("ALERT_CHAT_MARGIN", "   ")
 
-    assert _resolve_alert_chat_id("cargo") == "-100default"
+    assert _resolve_alert_chat_id("Слив маржи / Убыток") == "-100default"
 
 
 def test_resolve_alert_chat_id_uses_alert_chat_default(
@@ -886,58 +931,12 @@ def test_resolve_alert_chat_id_uses_alert_chat_default(
     assert _resolve_alert_chat_id("unknown_biz") == "-100fallback"
 
 
-#: Exact Russian labels emitted by ``classifier.CATEGORIES`` -> env variable.
-RUSSIAN_CATEGORY_ENV_VARS: Final[dict[str, str]] = {
-    "Фулфилмент": "ALERT_CHAT_FULFILLMENT",
-    "Карго / Логистика": "ALERT_CHAT_CARGO",
-    "Маркетинг / Трафик": "ALERT_CHAT_MARKETING",
-    "Дизайн / Контент": "ALERT_CHAT_DESIGN",
-}
-
-
-@pytest.mark.parametrize(
-    ("category", "env_var"),
-    sorted(RUSSIAN_CATEGORY_ENV_VARS.items()),
-)
-def test_resolve_alert_chat_id_routes_russian_category(
-    alert_env: pytest.MonkeyPatch,
-    category: str,
-    env_var: str,
-) -> None:
-    """Russian classifier labels route to their dedicated chat id."""
-    alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-1009999999999")
-    alert_env.setenv(env_var, f"-100{env_var.lower()}")
-
-    assert _resolve_alert_chat_id(category) == f"-100{env_var.lower()}"
-
-
-@pytest.mark.parametrize(
-    ("category", "env_var"),
-    sorted(RUSSIAN_CATEGORY_ENV_VARS.items()),
-)
-def test_resolve_alert_chat_id_russian_category_is_normalised(
-    alert_env: pytest.MonkeyPatch,
-    category: str,
-    env_var: str,
-) -> None:
-    """Russian labels match case-insensitively and ignore surrounding spaces."""
-    alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-1009999999999")
-    alert_env.setenv(env_var, f"-100{env_var.lower()}")
-
-    assert _resolve_alert_chat_id(f"  {category.upper()}  ") == (
-        f"-100{env_var.lower()}"
-    )
-    assert _resolve_alert_chat_id(f"\t{category.lower()}\n") == (
-        f"-100{env_var.lower()}"
-    )
-
-
 def test_resolve_alert_chat_id_russian_other_falls_back(
     alert_env: pytest.MonkeyPatch,
 ) -> None:
     """The Russian ``Другое`` label has no route and uses the default chat."""
     alert_env.setenv("TELEGRAM_ALERT_CHAT_ID", "-100default")
-    alert_env.setenv("ALERT_CHAT_CARGO", "-100cargo")
+    alert_env.setenv("ALERT_CHAT_MARGIN", "-100margin")
 
     assert _resolve_alert_chat_id("Другое") == "-100default"
 

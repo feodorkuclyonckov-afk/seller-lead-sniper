@@ -35,14 +35,16 @@ Message format
 Alerts use Telegram's ``HTML`` parse mode (far less error-prone than
 MarkdownV2, which requires escaping a dozen punctuation characters)::
 
-    🎯 [Карго / Логистика] — Рейтинг: 9/10
+    🚨 Селлер теряет маржу! [Слив маржи / Убыток] — Рейтинг: 9/10
 
-    Поиск карго из Китая в Москву
+    Боль / Суть: Маржа упала до 3% из-за автоакции Ozon
+    Чат: WB / Ozon Селлеры
+    Ссылка: Перейти к сообщению
 
-    📍 Источник: Карго Чат Москва
-    🔗 Открыть сообщение
+    <blockquote>Ozon включил автоакцию, маржа упала до 3%.</blockquote>
 
-    «Ищу карго из Китая в Москву, кто занимается доставкой под ключ?»
+    💡 Совет: ответьте автору с экспертным советом по юнит-экономике или
+    предложите проверку маржи через @marginkeeper_bot.
 
 All user-controlled fragments are HTML-escaped, and the final body is capped at
 Telegram's 4096-character limit.
@@ -141,21 +143,15 @@ FALLBACK_CHAT_ENV: Final[str] = "ALERT_CHAT_DEFAULT"
 
 #: Category (lower-case) -> dedicated destination chat environment variable.
 #:
-#: Both the English keys and the exact Russian labels emitted by
-#: :data:`classifier.CATEGORIES` are accepted, so a classifier payload routes
-#: correctly without any translation layer. Keys are matched after stripping
-#: surrounding whitespace and lower-casing (see :func:`resolve_alert_chat_id`).
-CATEGORY_CHAT_ENV: Final[dict[str, str]] = {
-    # English aliases.
-    "fulfillment": "ALERT_CHAT_FULFILLMENT",
-    "cargo": "ALERT_CHAT_CARGO",
-    "marketing": "ALERT_CHAT_MARKETING",
-    "design": "ALERT_CHAT_DESIGN",
-    # Russian labels emitted by classifier.CATEGORIES.
-    "фулфилмент": "ALERT_CHAT_FULFILLMENT",
-    "карго / логистика": "ALERT_CHAT_CARGO",
-    "маркетинг / трафик": "ALERT_CHAT_MARKETING",
-    "дизайн / контент": "ALERT_CHAT_DESIGN",
+#: The exact Russian labels emitted by :data:`classifier.CATEGORIES` are
+#: accepted, so a classifier payload routes correctly without any translation
+#: layer. Keys are matched after stripping surrounding whitespace and
+#: lower-casing (see :func:`resolve_alert_chat_id`).
+CATEGORY_CHAT_ENV: dict[str, str] = {
+    "Автоакция / Цены": "ALERT_CHAT_PRICING",
+    "Логистика / Хранение": "ALERT_CHAT_LOGISTICS",
+    "Штрафы / Удержания": "ALERT_CHAT_PENALTIES",
+    "Слив маржи / Убыток": "ALERT_CHAT_MARGIN",
 }
 
 #: Matches a trailing, possibly incomplete HTML entity (``&amp``, ``&#12``).
@@ -238,7 +234,14 @@ def resolve_alert_chat_id(category: str | None = None) -> str:
             is configured.
     """
     normalised = (category or "").strip().lower()
-    env_name = CATEGORY_CHAT_ENV.get(normalised) if normalised else None
+    env_name: str | None = None
+    if normalised:
+        # The mapping keys are human-readable labels (mixed case), so match
+        # them case-insensitively against the normalised category.
+        for label, candidate in CATEGORY_CHAT_ENV.items():
+            if label.strip().lower() == normalised:
+                env_name = candidate
+                break
 
     if env_name is not None:
         routed = _read(env_name)
@@ -435,7 +438,7 @@ def format_alert(
     source_chat: str,
     msg_link: str | None = None,
 ) -> str:
-    """Render a lead as a Telegram HTML message body.
+    """Render a seller-pain lead as a Telegram HTML message body.
 
     The output is safe to send with ``parse_mode="HTML"``: every interpolated
     fragment is escaped, the snippet is truncated, and the whole body is capped
@@ -471,29 +474,42 @@ def format_alert(
 
     snippet = _truncate(_collapse(original_text or ""), MAX_SNIPPET_CHARS) or "—"
 
-    header = f"🎯 <b>[{_escape(category)}]</b>"
+    header = f"🚨 <b>Селлер теряет маржу! [{_escape(category)}]</b>"
     if confidence is not None:
         header += f" — Рейтинг: {confidence}/10"
 
-    summary_line = f"<b>{_escape(summary)}</b>"
+    summary_block = f"<b>Боль / Суть:</b> {_escape(summary)}"
+    source_block = f"<b>Чат:</b> {_escape(source)}"
 
-    source_block = f"📍 Источник: <b>{_escape(source)}</b>"
     link = _safe_link(msg_link)
     if link is not None:
-        source_block += (
-            f'\n🔗 <a href="{html.escape(link, quote=True)}">'
-            "Открыть сообщение</a>"
+        link_block = (
+            f'<b>Ссылка:</b> <a href="{html.escape(link, quote=True)}">'
+            "Перейти к сообщению</a>"
         )
+    else:
+        link_block = "<b>Ссылка:</b> —"
+
+    footer = (
+        "\n<i>💡 Совет: ответьте автору с экспертным советом по "
+        "юнит-экономике или предложите проверку маржи через "
+        "@marginkeeper_bot.</i>"
+    )
+
+    def _render(snippet_html: str) -> str:
+        body = "\n\n".join(
+            (
+                header,
+                summary_block,
+                source_block,
+                link_block,
+                f"<blockquote>{snippet_html}</blockquote>",
+            )
+        )
+        return body + footer
 
     escaped_snippet = _escape(snippet)
-    message = "\n\n".join(
-        (
-            header,
-            summary_line,
-            source_block,
-            f"<blockquote>{escaped_snippet}</blockquote>",
-        )
-    )
+    message = _render(escaped_snippet)
 
     if len(message) <= MAX_MESSAGE_LENGTH:
         return message
@@ -510,14 +526,7 @@ def format_alert(
     if escaped_snippet:
         escaped_snippet += "…"
 
-    return "\n\n".join(
-        (
-            header,
-            summary_line,
-            source_block,
-            f"<blockquote>{escaped_snippet}</blockquote>",
-        )
-    )
+    return _render(escaped_snippet)
 
 
 # --------------------------------------------------------------------------- #

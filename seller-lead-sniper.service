@@ -1,0 +1,16 @@
+[Unit]
+Description=Seller Lead Sniper — Marketplace Distress Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/seller-lead-sniper
+ExecStart=/opt/seller-lead-sniper/.venv/bin/python main.py --live
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

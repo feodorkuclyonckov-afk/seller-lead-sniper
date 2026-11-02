@@ -3,11 +3,12 @@
 Modes
 -----
 ``--demo``
-    Interactive, offline-friendly simulation: a handful of sample B2B messages
-    is fed through :func:`pipeline.process_raw_message` with a configurable
-    delay between them. Every stage is logged, and any message that survives all
-    four steps dispatches a *real* Telegram alert to the configured channel
-    (configure ``TELEGRAM_BOT_TOKEN`` / ``TELEGRAM_ALERT_CHAT_ID`` in ``.env``).
+    Interactive, offline-friendly simulation: a handful of marketplace seller
+    messages is fed through :func:`pipeline.process_raw_message` with a
+    configurable delay between them. Every stage is logged, and any message that
+    survives all four steps dispatches a *real* Telegram alert to the configured
+    channel (configure ``TELEGRAM_BOT_TOKEN`` / ``TELEGRAM_ALERT_CHAT_ID`` in
+    ``.env``).
 
 ``--live``
     Starts a Telethon client, listens for incoming messages on the watched
@@ -76,41 +77,48 @@ EXIT_OK: int = 0
 EXIT_CONFIG_ERROR: int = 1
 EXIT_RUNTIME_ERROR: int = 2
 
-#: Sample messages fed through the pipeline in demo mode. Each tuple is
-#: ``(text, source_chat, msg_link)``.
+#: Sample marketplace seller messages fed through the pipeline in demo mode.
+#: Each tuple is ``(text, source_chat, msg_link)``. The first four are real
+#: pain-point leads; the last two are locally filtered noise.
 DEMO_MESSAGES: tuple[tuple[str, str, str | None], ...] = (
     (
-        "Ищу карго из Китая в Москву, кто занимается доставкой под ключ? "
-        "Нужен надёжный подрядчик.",
-        "Карго Чат Москва",
-        "https://t.me/cargo_chat_moscow/12345",
+        "Включили принудительную автоакцию на весь ассортимент, цены срезали "
+        "ниже себестоимости, скидки рисуют сами, маржа уже в минус. "
+        "Кто сталкивался, как отключить?",
+        "WB Селлеры Чат",
+        "https://t.me/wb_sellers_chat/12345",
     ),
     (
-        "Предлагаю услуги карго из Китая, пишите в личку, места ограничены",
-        "Карго Чат Москва",
+        "С 11 числа WB поднял коэффициент склада до х5, логистика и хранение "
+        "пересчитали задним числом, доплата выросла в три раза. "
+        "Кто оспаривал такие начисления?",
+        "WB Логистика Чат",
+        "https://t.me/wb_logistics_chat/777",
+    ),
+    (
+        "Прилетел штраф за перемер габаритов: удержали 40 тысяч из отчёта "
+        "реализации, хотя упаковка не менялась. Как доказать, что замер "
+        "неверный?",
+        "WB Штрафы Чат",
+        "https://t.me/wb_fines_chat/4321",
+    ),
+    (
+        "Из-за рекламы и скидок пошёл полный слив маржи, товар продаётся "
+        "в убыток, уже кассовый разрыв на закупку следующей партии. "
+        "Что делать?",
+        "Ozon Селлеры Чат",
+        "https://t.me/ozon_sellers_chat/555",
+    ),
+    (
+        "Предлагаю услуги по накрутке отзывов и продвижению карточек WB, "
+        "пишите в личку, выведу в топ за месяц.",
+        "Маркетплейс Услуги",
         None,
     ),
     (
-        "Нужен специалист по таргету для интернет-магазина, кто работает "
-        "с e-commerce?",
-        "E-commerce Россия",
-        "https://t.me/ecom_russia/777",
-    ),
-    (
-        "Ну кто-нибудь знает, где тут кофе купить?",
+        "Всем привет, как у вас дела?",
         "Болталка",
         None,
-    ),
-    (
-        "Посоветуйте дизайнера для креативов, кто делает рекламные баннеры "
-        "для маркетплейсов",
-        "Маркетплейсы Чат",
-        "https://t.me/marketplace_chat/4321",
-    ),
-    (
-        "Ищу подрядчика по фулфилменту, нужен склад в Москве для сборки заказов",
-        "Фулфилмент Обмен",
-        "https://t.me/fulfillment_exchange/88",
     ),
 )
 

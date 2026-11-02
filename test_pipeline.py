@@ -14,10 +14,11 @@ required:
   ``None`` for the simulated API failure.
 * **Telegram notifier** — replaced by a recorder that asserts dispatch payloads.
 
-A batch of 10 diverse messages covers every terminal status: local filter,
-duplicate, LLM rejection, LLM unavailability, and successful dispatch. The
-suite then verifies the counter distribution, dispatch gating and the defensive
-error path. Exit code ``0`` means every check passed; ``1`` means otherwise.
+A batch of 10 marketplace seller messages covers every terminal status: local
+filter (spam and short noise), duplicate, LLM rejection, LLM unavailability,
+and successful dispatch of real seller pain points. The suite then verifies the
+counter distribution, dispatch gating and the defensive error path. Exit code
+``0`` means every check passed; ``1`` means otherwise.
 """
 
 from __future__ import annotations
@@ -39,63 +40,86 @@ import pipeline
 # Fixtures — message bodies and their expected classification
 # --------------------------------------------------------------------------- #
 
-LEAD_CARGO: Final[str] = (
-    "Ищу карго из Китая в Москву, кто занимается доставкой под ключ? "
-    "Нужен надёжный подрядчик."
+#: Forced auto-action and price dump below cost — a real lead.
+LEAD_AUTO: Final[str] = (
+    "Включили принудительную автоакцию на весь ассортимент, цены срезали "
+    "ниже себестоимости, скидки рисуют сами, маржа уже в минус. "
+    "Кто сталкивался, как отключить?"
 )
 
-LEAD_TARGET: Final[str] = (
-    "Нужен специалист по таргету для интернет-магазина, кто работает "
-    "с e-commerce?"
+#: Warehouse coefficient spike / logistics re-calculation — a real lead.
+LEAD_LOGISTICS: Final[str] = (
+    "С 11 числа WB поднял коэффициент склада до х5, логистика и хранение "
+    "пересчитали задним числом, доплата выросла в три раза. "
+    "Кто оспаривал такие начисления?"
 )
 
-LEAD_DESIGN: Final[str] = (
-    "Посоветуйте дизайнера для креативов, кто делает рекламные баннеры "
-    "для маркетплейсов"
+#: Packaging dimension fine / deduction in the sales report — a real lead.
+LEAD_FINE: Final[str] = (
+    "Прилетел штраф за перемер габаритов: удержали 40 тысяч из отчёта "
+    "реализации, хотя упаковка не менялась. Как доказать, что замер неверный?"
 )
+
+#: Agency ad / reviews boosting spam — must be rejected by the local filter.
+SPAM_AGENCY: Final[str] = (
+    "Предлагаю услуги по накрутке отзывов и продвижению карточек WB, "
+    "пишите в личку, выведу в топ за месяц."
+)
+
+#: Casual chatter with no pain trigger — must be rejected by the local filter.
+OFF_TOPIC: Final[str] = (
+    "Сегодня отличная погода в Москве, все пошли гулять в парк"
+)
+
+#: Low-length query — must be rejected by the length gate.
+SHORT_QUERY: Final[str] = "цена?"
 
 AMBIGUOUS: Final[str] = (
-    "Интересует тема маркетинга, но пока просто читаю и собираю информацию"
+    "Читаю новости про новые штрафы маркетплейсов, пока просто собираю "
+    "информацию, сам пока не попал."
 )
 
 LLM_FAILURE: Final[str] = (
-    "Ищу подрядчика по фулфилменту, нужен склад в Москве для сборки заказов"
+    "Логистика пересчитала хранение задним числом, доплата за приёмку "
+    "выросла вдвое, не понимаю, откуда такой коэффициент."
 )
 
 #: Text used by the defensive error-path check (passes the local filter).
 ERROR_TEXT: Final[str] = (
-    "Ищу поставщика фулфилмента в Москве, кто оказывает услуги склада?"
+    "Автоакция срезала цену ниже себестоимости, продажи в минус, "
+    "не пойму, как это отключить."
 )
 
 #: Text used by the fallback check (passes the local filter, LLM returns None).
 FALLBACK_TEXT: Final[str] = (
-    "Нужен карго-подрядчик для доставки из Гуанчжоу, кто возит сборные грузы?"
+    "Штраф за габариты удержали из отчёта реализации, логистика списала "
+    "лишнее, как оспорить удержание?"
 )
 
 #: Deterministic classifier responses keyed by stripped message body.
 CLASSIFIER_RESPONSES: Final[dict[str, dict[str, Any] | None]] = {
-    LEAD_CARGO: {
+    LEAD_AUTO: {
         "is_lead": True,
-        "category": "Карго / Логистика",
-        "summary": "Поиск карго из Китая в Москву",
+        "category": "Автоакция / Цены",
+        "summary": "Принудительная автоакция уронила цену ниже себестоимости",
         "confidence": 9,
     },
-    LEAD_TARGET: {
+    LEAD_LOGISTICS: {
         "is_lead": True,
-        "category": "Маркетинг / Трафик",
-        "summary": "Поиск таргетолога для интернет-магазина",
+        "category": "Логистика / Хранение",
+        "summary": "Скачок коэффициента склада и пересчёт логистики",
         "confidence": 8,
     },
-    LEAD_DESIGN: {
+    LEAD_FINE: {
         "is_lead": True,
-        "category": "Дизайн / Контент",
-        "summary": "Поиск дизайнера для рекламных креативов",
-        "confidence": 7,
+        "category": "Штрафы / Удержания",
+        "summary": "Штраф за перемер габаритов удержан из отчёта",
+        "confidence": 9,
     },
     AMBIGUOUS: {
         "is_lead": False,
         "category": "Другое",
-        "summary": "Автор просто читает тему маркетинга",
+        "summary": "Автор только читает новости о штрафах",
         "confidence": 3,
     },
     LLM_FAILURE: None,
@@ -113,32 +137,32 @@ BATCH: Final[tuple[tuple[str, str, str, str | None, str, str | None], ...]] = (
     ),
     (
         "seller-spam",
-        "Предлагаю услуги карго из Китая, пишите в личку, места ограничены",
-        "Карго Чат Москва",
+        SPAM_AGENCY,
+        "Маркетплейс Услуги",
         None,
         pipeline.STATUS_FILTERED,
         pipeline.FILTER_REASON,
     ),
     (
         "off-topic",
-        "Сегодня отличная погода в Москве, все пошли гулять в парк",
+        OFF_TOPIC,
         "Болталка",
         None,
         pipeline.STATUS_FILTERED,
         pipeline.FILTER_REASON,
     ),
     (
-        "valid-cargo",
-        LEAD_CARGO,
-        "Карго Чат Москва",
-        "https://t.me/cargo_chat_moscow/12345",
+        "valid-auto",
+        LEAD_AUTO,
+        "WB Селлеры Чат",
+        "https://t.me/wb_sellers_chat/12345",
         pipeline.STATUS_DISPATCHED,
         None,
     ),
     (
-        "repost-cargo",
-        LEAD_CARGO,
-        "Карго Чат СПб",
+        "repost-auto",
+        LEAD_AUTO,
+        "Ozon Селлеры Чат",
         None,
         pipeline.STATUS_DUPLICATE,
         None,
@@ -146,38 +170,38 @@ BATCH: Final[tuple[tuple[str, str, str, str | None, str, str | None], ...]] = (
     (
         "ambiguous",
         AMBIGUOUS,
-        "Маркетинг Обмен",
-        "https://t.me/marketing_exchange/222",
+        "Маркетплейс Новости",
+        "https://t.me/marketplace_news/222",
         pipeline.STATUS_REJECTED_BY_LLM,
         None,
     ),
     (
-        "valid-target",
-        LEAD_TARGET,
-        "E-commerce Россия",
-        "https://t.me/ecom_russia/777",
+        "valid-logistics",
+        LEAD_LOGISTICS,
+        "WB Логистика Чат",
+        "https://t.me/wb_logistics_chat/777",
         pipeline.STATUS_DISPATCHED,
         None,
     ),
     (
         "llm-down",
         LLM_FAILURE,
-        "Фулфилмент Обмен",
+        "Ozon Хранение Чат",
         None,
         pipeline.STATUS_LLM_UNAVAILABLE,
         None,
     ),
     (
-        "valid-design",
-        LEAD_DESIGN,
-        "Маркетплейсы Чат",
-        "https://t.me/marketplace_chat/4321",
+        "valid-fine",
+        LEAD_FINE,
+        "WB Штрафы Чат",
+        "https://t.me/wb_fines_chat/4321",
         pipeline.STATUS_DISPATCHED,
         None,
     ),
     (
         "short-noise",
-        "цена?",
+        SHORT_QUERY,
         "Барахолка",
         None,
         pipeline.STATUS_FILTERED,
@@ -324,15 +348,14 @@ async def test_batch(reporter: Reporter, db_path: str) -> None:
     )
     reporter.check(
         "duplicate repost was NOT sent to the LLM",
-        classify_calls.count(LEAD_CARGO.strip()) == 1,
-        detail=f"seen {classify_calls.count(LEAD_CARGO.strip())}x",
+        classify_calls.count(LEAD_AUTO.strip()) == 1,
+        detail=f"seen {classify_calls.count(LEAD_AUTO.strip())}x",
     )
     reporter.check(
         "filtered messages never reached the LLM",
         not any(
             text in classify_calls
-            for text in ("+", "цена?", "Сегодня отличная погода в Москве, "
-                         "все пошли гулять в парк")
+            for text in ("+", SHORT_QUERY, OFF_TOPIC, SPAM_AGENCY)
         ),
     )
     reporter.check(
@@ -350,7 +373,7 @@ async def test_batch(reporter: Reporter, db_path: str) -> None:
     reporter.check(
         "dispatched the three expected categories",
         {item["lead_data"]["category"] for item in dispatched}
-        == {"Карго / Логистика", "Маркетинг / Трафик", "Дизайн / Контент"},
+        == {"Автоакция / Цены", "Логистика / Хранение", "Штрафы / Удержания"},
         detail=str(sorted(
             item["lead_data"]["category"] for item in dispatched
         )),
@@ -360,10 +383,10 @@ async def test_batch(reporter: Reporter, db_path: str) -> None:
         all(item["source_chat"] for item in dispatched),
     )
     reporter.check(
-        "cargo lead carried its permalink",
+        "auto-action lead carried its permalink",
         any(
-            item["lead_data"]["category"] == "Карго / Логистика"
-            and item["msg_link"] == "https://t.me/cargo_chat_moscow/12345"
+            item["lead_data"]["category"] == "Автоакция / Цены"
+            and item["msg_link"] == "https://t.me/wb_sellers_chat/12345"
             for item in dispatched
         ),
     )
@@ -378,8 +401,8 @@ async def test_batch(reporter: Reporter, db_path: str) -> None:
 
     # -- Deduplication cache state ----------------------------------------- #
     reporter.section("5. Deduplication cache state")
-    again = await db_module.is_duplicate(LEAD_CARGO, db_path)
-    reporter.check("cargo lead recorded in the cache", again is True)
+    again = await db_module.is_duplicate(LEAD_AUTO, db_path)
+    reporter.check("auto-action lead recorded in the cache", again is True)
 
 
 async def test_error_path(reporter: Reporter, db_path: str) -> None:

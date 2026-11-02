@@ -64,7 +64,7 @@ def test_build_proxy_builds_dict_for_real_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A real host produces a python-socks style proxy dict."""
-    monkeypatch.setenv("PROXY_HOST", " 196.18.15.173 ")
+    monkeypatch.setenv("PROXY_HOST", " 192.0.2.10 ")
     monkeypatch.setenv("PROXY_PORT", "8000")
     monkeypatch.setenv("PROXY_TYPE", "http")
     monkeypatch.delenv("PROXY_USER", raising=False)
@@ -75,7 +75,7 @@ def test_build_proxy_builds_dict_for_real_host(
 
     assert join_chats.build_proxy() == {
         "proxy_type": "http",
-        "addr": "196.18.15.173",
+        "addr": "192.0.2.10",
         "port": 8000,
         "rdns": False,
     }
@@ -93,7 +93,7 @@ def test_load_environment_overrides_stale_proxy_host(
     env_file = tmp_path / ".env"
     env_file.write_text("PROXY_HOST=\n", encoding="utf-8")
     monkeypatch.setattr(join_chats, "ENV_FILE", env_file)
-    monkeypatch.setenv("PROXY_HOST", "196.18.15.173")
+    monkeypatch.setenv("PROXY_HOST", "192.0.2.10")
 
     join_chats.load_environment()
 

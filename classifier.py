@@ -1,12 +1,13 @@
-"""Sprint 3 — async LLM lead classifier for scraped Telegram messages.
+"""Sprint 3 — async LLM seller-pain classifier for scraped Telegram messages.
 
 Purpose
 -------
 Sprint 2's :mod:`filters` module removes obvious noise locally, but the
-remaining messages still need a semantic judgement: is the author *asking for
-a contractor* (a lead) or merely chatting, advertising, or offering their own
-services? That judgement is delegated to an OpenAI-compatible chat model
-(DeepSeek by default).
+remaining messages still need a semantic judgement: is the author a
+Wildberries/Ozon seller reporting acute margin loss, unexpected fines, or
+logistics re-calculations (a lead) — or merely chatting, advertising, or
+offering their own services? That judgement is delegated to an
+OpenAI-compatible chat model (DeepSeek by default).
 
 The classifier is deliberately defensive. A scraping pipeline must never die
 because a third-party API timed out, rate-limited us, or returned malformed
@@ -88,10 +89,10 @@ MAX_CONFIDENCE: Final[int] = 10
 
 #: Allowed categories, in the exact spelling expected downstream.
 CATEGORIES: Final[tuple[str, ...]] = (
-    "Фулфилмент",
-    "Карго / Логистика",
-    "Маркетинг / Трафик",
-    "Дизайн / Контент",
+    "Автоакция / Цены",
+    "Логистика / Хранение",
+    "Штрафы / Удержания",
+    "Слив маржи / Убыток",
     "Другое",
 )
 
@@ -103,27 +104,37 @@ ENV_FILE: Final[Path] = Path(__file__).resolve().with_name(".env")
 
 #: System prompt describing the qualification task and the JSON contract.
 SYSTEM_PROMPT: Final[str] = """\
-Ты — опытный B2B-аналитик агентства, которое оказывает услуги фулфилмента,
-карго-логистики, маркетинга и дизайна для e-commerce.
+Ты — аналитик операционных рисков и юнит-экономики маркетплейсов.
 
-Твоя задача — по сообщению из Telegram-чата определить, является ли автор
-потенциальным клиентом (заказчиком), который ищет подрядчика или исполнителя.
+Твоя задача — по сообщению из Telegram-сообщества продавцов определить,
+столкнулся ли автор с потерей денег или срочной операционной проблемой
+на Wildberries или Ozon.
 
 Категории (используй ровно одну из них):
-- "Фулфилмент" — хранение, сборка заказов, упаковка, обработка возвратов, склад.
-- "Карго / Логистика" — доставка из Китая и других стран, карго, перевозки, таможня.
-- "Маркетинг / Трафик" — таргет, реклама, SEO, продвижение, трафик, аналитика.
-- "Дизайн / Контент" — дизайн сайта и креативов, фото, видео, тексты, контент.
-- "Другое" — запрос не относится к перечисленным услугам.
+- "Автоакция / Цены" — принудительные автоакции, неожиданное снижение цен,
+  неучтённые скидки.
+- "Логистика / Хранение" — неожиданные доплаты за логистику или хранение,
+  рост коэффициентов складов.
+- "Штрафы / Удержания" — штрафы, пенальти, удержания, перемеры габаритов.
+- "Слив маржи / Убыток" — работа в минус, отрицательная маржа, кассовый разрыв.
+- "Другое" — сообщение не указывает на потери или срочную проблему.
 
 Правила:
-1. is_lead = true только если автор ищет исполнителя, подрядчика или поставщика услуг.
-2. is_lead = false для самопрезентаций, рекламы курсов, продажи баз, вакансий,
-   флуда, вопросов от самих исполнителей и сообщений без запроса.
-3. summary — краткое описание запроса на русском, строго 5–8 слов, без воды.
-4. confidence — целое число от 1 до 10: насколько уверенно сообщение является лидом.
+1. is_lead = true, если автор теряет деньги или сталкивается со срочной
+   операционной проблемой: принудительные автоакции, неожиданные снижения
+   цен, неучтённые скидки; внезапные доплаты за логистику/хранение, скачки
+   коэффициентов складов; штрафы, пенальти, перемеры габаритов; работа в
+   убыток, отрицательная маржа, кассовый разрыв.
+2. is_lead = false для презентаций услуг, рекламы курсов, агентских
+   предложений, маркетинга фулфилмента; общих новостей маркетплейсов,
+   обсуждений регулирования и мемов без личных потерь; вопросов новичков
+   («какую нишу выбрать») без отрицательной маржи.
+3. summary — краткое описание конкретной потери или проблемы на русском,
+   строго 5–8 слов, без воды.
+4. confidence — целое число от 1 до 10: насколько уверенно сообщение
+   описывает реальную потерю или срочную проблему.
 5. Отвечай ТОЛЬКО валидным JSON-объектом без markdown и пояснений, например:
-{"is_lead": true, "category": "Карго / Логистика", "summary": "Поиск карго из Китая в Москву", "confidence": 9}
+{"is_lead": true, "category": "Штрафы / Удержания", "summary": "Неожиданный штраф за перемер габаритов", "confidence": 9}
 """
 
 #: Case-insensitive lookup used to canonicalise model-provided categories.
@@ -392,7 +403,7 @@ async def classify_message(
     config: LLMConfig | None = None,
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> dict[str, Any] | None:
-    """Classify one Telegram message as a potential B2B lead.
+    """Classify one Telegram message as a seller pain-point lead.
 
     Args:
         text: Raw message body.

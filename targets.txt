@@ -53,3 +53,14 @@ wildberries_suppliers_sellers
 wb_chat_otzyvy
 wb_ozon_chat
 suppliers_wbb
+
+# Starter curated pool of popular public seller chats/groups.
+# Usernames are verified manually before being added to the live monitor.
+wb_chat
+seller_chat
+wb_sellers
+ozon_sellers
+marketplace_sellers
+wildberries_sellers_chat
+wb_ozon_help
+sellers_ozon_wb

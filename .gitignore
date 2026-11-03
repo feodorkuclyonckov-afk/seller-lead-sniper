@@ -16,6 +16,11 @@
 qr.png
 qr.png.tmp
 
+# QR codes & temporary images
+*.png
+*.jpg
+*.jpeg
+
 # Local deduplication database (regenerated at runtime)
 *.db*
 *.db-wal

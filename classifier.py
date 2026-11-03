@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Mapping
 
+import httpx
 from dotenv import load_dotenv
 from openai import (
     APIConnectionError,
@@ -56,6 +57,8 @@ from openai import (
     OpenAIError,
     RateLimitError,
 )
+
+from notifier import resolve_proxy_url
 
 LOGGER = logging.getLogger("lead_sniper.classifier")
 
@@ -234,47 +237,122 @@ async def load_llm_config(env_file: str | Path | None = None) -> LLMConfig:
 # --------------------------------------------------------------------------- #
 
 _client: AsyncOpenAI | None = None
-_client_signature: tuple[str, str, float] | None = None
+_client_signature: tuple[str, str, float, str] | None = None
+_http_client: httpx.AsyncClient | None = None
+
+
+async def _close_quietly(client: AsyncOpenAI) -> None:
+    """Close ``client`` and swallow any shutdown error."""
+    try:
+        await client.close()
+    except Exception:  # pragma: no cover - shutdown best effort
+        LOGGER.debug("Error while closing a replaced LLM client.", exc_info=True)
+
+
+def _schedule_close(client: AsyncOpenAI) -> None:
+    """Best-effort asynchronous close of a client being replaced.
+
+    ``_get_client`` is synchronous, so the previous transport cannot be awaited
+    inline. When an event loop is running (the normal case, since the client is
+    built from :func:`classify_message`), the close is scheduled as a task;
+    otherwise the reference is simply dropped and :func:`aclose` handles it.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_close_quietly(client))
 
 
 def _get_client(config: LLMConfig) -> AsyncOpenAI:
     """Return a cached ``AsyncOpenAI`` client for ``config``.
 
-    The client is recreated only when the key, base URL or timeout changes.
+    The client is recreated only when the key, base URL, timeout or proxy route
+    changes. When a proxy is configured (see
+    :func:`notifier.resolve_proxy_url`), an :class:`httpx.AsyncClient` bound to
+    that proxy is injected via ``http_client`` so every LLM request egresses
+    through the same path that already works for Telegram. Without a proxy the
+    SDK's default direct transport is used.
+
     ``max_retries=0`` is passed to the SDK because retries are handled here,
     which keeps the backoff policy explicit and testable.
     """
-    global _client, _client_signature
+    global _client, _client_signature, _http_client
 
-    signature = (config.api_key, config.base_url, config.timeout)
-    if _client is None or _client_signature != signature:
-        _client = AsyncOpenAI(
-            api_key=config.api_key,
-            base_url=config.base_url,
-            timeout=config.timeout,
-            max_retries=0,
-        )
-        _client_signature = signature
-        LOGGER.debug(
-            "Created AsyncOpenAI client (base_url=%s, model=%s).",
-            config.base_url,
-            config.model,
-        )
+    proxy_url = resolve_proxy_url()
+    signature = (
+        config.api_key,
+        config.base_url,
+        config.timeout,
+        proxy_url or "",
+    )
+    if _client is not None and _client_signature == signature:
+        return _client
+
+    # A different configuration is taking over: release the previous transport.
+    if _client is not None:
+        _schedule_close(_client)
+
+    http_client: httpx.AsyncClient | None = None
+    if proxy_url is not None:
+        try:
+            http_client = httpx.AsyncClient(
+                proxy=proxy_url, timeout=config.timeout
+            )
+        except Exception:
+            # A missing SOCKS backend or an invalid proxy URL must not disable
+            # classification entirely — fall back to direct egress.
+            LOGGER.exception(
+                "Could not create the proxy HTTP client; using direct egress."
+            )
+            http_client = None
+        else:
+            LOGGER.info(
+                "Routing LLM requests through proxy %s.",
+                proxy_url.rsplit("@", 1)[-1],
+            )
+
+    _client = AsyncOpenAI(
+        api_key=config.api_key,
+        base_url=config.base_url,
+        timeout=config.timeout,
+        max_retries=0,
+        http_client=http_client,
+    )
+    _http_client = http_client
+    _client_signature = signature
+    LOGGER.debug(
+        "Created AsyncOpenAI client (base_url=%s, model=%s, proxy=%s).",
+        config.base_url,
+        config.model,
+        "yes" if proxy_url is not None else "no",
+    )
     return _client
 
 
 async def aclose() -> None:
     """Close the cached client and release its HTTP connections."""
-    global _client, _client_signature
+    global _client, _client_signature, _http_client
 
     client, _client = _client, None
+    http_client, _http_client = _http_client, None
     _client_signature = None
-    if client is None:
-        return
-    try:
-        await client.close()
-    except Exception:  # pragma: no cover - shutdown best effort
-        LOGGER.debug("Error while closing the LLM client.", exc_info=True)
+
+    if client is not None:
+        try:
+            await client.close()
+        except Exception:  # pragma: no cover - shutdown best effort
+            LOGGER.debug("Error while closing the LLM client.", exc_info=True)
+
+    # ``AsyncOpenAI.close()`` already closes an injected transport, but closing
+    # it explicitly keeps the lifecycle correct even if the SDK changes.
+    if http_client is not None:
+        try:
+            await http_client.aclose()
+        except Exception:  # pragma: no cover - shutdown best effort
+            LOGGER.debug(
+                "Error while closing the LLM HTTP client.", exc_info=True
+            )
 
 
 # --------------------------------------------------------------------------- #
